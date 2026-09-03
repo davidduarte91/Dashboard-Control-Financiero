@@ -27,17 +27,16 @@ const money = (value: number, currency: Currency = "ARS") =>
   new Intl.NumberFormat("es-AR", { style: "currency", currency }).format(value);
 
 export default function Home() {
-  const [entries, setEntries] = useState<Entry[]>(initialEntries);
-  const [isModalOpen, setModalOpen] = useState(false);
-  const [isDark, setDark] = useState(false);
-  const [type, setType] = useState<EntryType>("Sobre");
-
-  useEffect(() => {
+  const [entries, setEntries] = useState<Entry[]>(() => {
+    if (typeof window === "undefined") return initialEntries;
     const savedEntries = localStorage.getItem("finanzas-entries");
-    const savedTheme = localStorage.getItem("finanzas-theme");
-    if (savedEntries) setEntries(JSON.parse(savedEntries));
-    if (savedTheme === "dark") setDark(true);
-  }, []);
+    return savedEntries ? JSON.parse(savedEntries) : initialEntries;
+  });
+  const [isModalOpen, setModalOpen] = useState(false);
+  const [isDark, setDark] = useState(() =>
+    typeof window !== "undefined" && localStorage.getItem("finanzas-theme") === "dark",
+  );
+  const [type, setType] = useState<EntryType>("Sobre");
 
   useEffect(() => {
     document.documentElement.dataset.theme = isDark ? "dark" : "light";
