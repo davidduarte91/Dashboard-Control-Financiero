@@ -16,7 +16,7 @@ type Entry = {
 };
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
 const descriptions: Record<string, string> = {
-  FCI: "Fondos comunes de inversiÛn",
+  FCI: "Fondos comunes de inversi√≥n",
   Cedears: "Posiciones agrupadas",
   "Acciones argentinas": "Acciones locales agrupadas",
   Criptomonedas: "Lemon, Nexo y otros exchanges",
@@ -183,7 +183,7 @@ export default function Home() {
       form.get(investmentMode === "new" ? "newInvestment" : "investment") || "",
     );
     if (movementKind === "retiro" && !envelope && !investment) {
-      window.alert("ElegÌ el sobre o la inversiÛn de donde sale el dinero.");
+      window.alert("Eleg√≠ el sobre o la inversi√≥n de donde sale el dinero.");
       return;
     }
     const entry: Entry = {
@@ -266,7 +266,7 @@ export default function Home() {
   const removeEnvelope = (name: string) => {
     if (
       !window.confirm(
-        `øEliminar el sobre "${name}"? Sus cargas quedar·n sin sobre.`,
+        `¬øEliminar el sobre "${name}"? Sus cargas quedar√°n sin sobre.`,
       )
     )
       return;
@@ -290,7 +290,7 @@ export default function Home() {
           </div>
         </div>
         <p className="nav-label">ESPACIO PERSONAL</p>
-        <nav className="main-nav" aria-label="NavegaciÛn principal">
+        <nav className="main-nav" aria-label="Navegaci√≥n principal">
           <a className="active" href="#resumen">
             <b>?</b> Resumen
           </a>
@@ -322,10 +322,10 @@ export default function Home() {
         <section className="welcome-row" id="resumen">
           <div>
             <h2>Tu patrimonio, en perspectiva.</h2>
-            <p>Estos son tus n˙meros al dÌa de hoy.</p>
+            <p>Estos son tus n√∫meros al d√≠a de hoy.</p>
           </div>
           <button className="primary-button" onClick={openNew}>
-            + Registrar actualizaciÛn
+            + Registrar actualizaci√≥n
           </button>
         </section>
         <section className="kpi-grid">
@@ -411,7 +411,7 @@ export default function Home() {
                         aria-label={`Eliminar ${item.name}`}
                         onClick={() => removeEnvelope(item.name)}
                       >
-                        ◊
+                        √ó
                       </button>
                     </div>
                   </div>
@@ -419,8 +419,8 @@ export default function Home() {
               </div>
             ) : (
               <div className="empty-state compact-empty">
-                <strong>TodavÌa no tenÈs sobres</strong>
-                <p>Cre· uno desde ìRegistrar actualizaciÛnî.</p>
+                <strong>Todav√≠a no ten√©s sobres</strong>
+                <p>Cre√° uno desde ‚ÄúRegistrar actualizaci√≥n‚Äù.</p>
               </div>
             )}
           </article>
@@ -443,7 +443,7 @@ export default function Home() {
                   const isWithdrawal = entry.kind === "retiro";
                   const label =
                     entry.kind === "valuacion"
-                      ? "ValuaciÛn"
+                      ? "Valuaci√≥n"
                       : isWithdrawal
                         ? "Retiro"
                         : "Aporte";
@@ -455,7 +455,7 @@ export default function Home() {
                       <div>
                         <strong>{entry.envelope || entry.investment}</strong>
                         <small>
-                          {label} ∑ {entry.account} ∑ {entry.date}
+                          {label} ¬∑ {entry.account} ¬∑ {entry.date}
                         </small>
                       </div>
                       <b className={isWithdrawal ? "negative" : ""}>
@@ -473,7 +473,7 @@ export default function Home() {
                         onClick={() => deleteEntry(entry.id)}
                         aria-label="Borrar carga"
                       >
-                        ◊
+                        √ó
                       </button>
                     </div>
                   );
@@ -481,7 +481,7 @@ export default function Home() {
               </div>
             ) : (
               <div className="empty-state">
-                <strong>A˙n no hay cargas</strong>
+                <strong>A√∫n no hay cargas</strong>
               </div>
             )}
           </article>
@@ -490,7 +490,7 @@ export default function Home() {
           <div className="panel-header">
             <div>
               <h3>Inversiones</h3>
-              <p>Capital y rendimiento por categorÌa</p>
+              <p>Capital y rendimiento por categor√≠a</p>
             </div>
           </div>
           {investments.map((name) => {
@@ -525,7 +525,7 @@ export default function Home() {
                   <div>
                     <strong>{name}</strong>
                     <small>
-                      {descriptions[name] || "CategorÌa personalizada"}
+                      {descriptions[name] || "Categor√≠a personalizada"}
                     </small>
                   </div>
                 </div>
@@ -577,14 +577,14 @@ export default function Home() {
             <div className="modal-header">
               <div>
                 <p className="eyebrow">
-                  {valuation ? "VALUACI”N" : "CARGA MANUAL"}
+                  {valuation ? "VALUACI√ìN" : "CARGA MANUAL"}
                 </p>
                 <h2>
                   {valuation
                     ? `Actualizar ${valuation}`
                     : editing
-                      ? "Editar actualizaciÛn"
-                      : "Registrar actualizaciÛn"}
+                      ? "Editar actualizaci√≥n"
+                      : "Registrar actualizaci√≥n"}
                 </h2>
               </div>
               <button
@@ -595,7 +595,7 @@ export default function Home() {
                 }}
                 aria-label="Cerrar"
               >
-                ◊
+                √ó
               </button>
             </div>
             {valuation ? (
@@ -641,7 +641,7 @@ export default function Home() {
                   </label>
                 </div>
                 <p className="form-hint">
-                  Esta valuaciÛn no modifica el capital aportado.
+                  Esta valuaci√≥n no modifica el capital aportado.
                 </p>
                 <div className="modal-actions">
                   <button
@@ -651,7 +651,7 @@ export default function Home() {
                   >
                     Cancelar
                   </button>
-                  <button className="primary-button">Guardar valuaciÛn</button>
+                  <button className="primary-button">Guardar valuaci√≥n</button>
                 </div>
               </form>
             ) : (
@@ -697,11 +697,11 @@ export default function Home() {
                     <input
                       name="newEnvelope"
                       disabled={envelopeMode !== "new"}
-                      placeholder="Ej. Tarjeta crÈdito Septiembre"
+                      placeholder="Ej. Tarjeta cr√©dito Septiembre"
                     />
                   </label>
                   <label>
-                    InversiÛn
+                    Inversi√≥n
                     <select
                       name="investment"
                       defaultValue={editing?.investment || ""}
@@ -712,17 +712,17 @@ export default function Home() {
                         )
                       }
                     >
-                      <option value="">Elegir inversiÛn</option>
+                      <option value="">Elegir inversi√≥n</option>
                       {investments.map((name) => (
                         <option key={name}>{name}</option>
                       ))}
                       <option value="__new__">
-                        + Crear nueva categorÌa...
+                        + Crear nueva categor√≠a...
                       </option>
                     </select>
                   </label>
                   <label>
-                    Nombre de categorÌa nueva{" "}
+                    Nombre de categor√≠a nueva{" "}
                     <span className="optional-label">(opcional)</span>
                     <input
                       name="newInvestment"
@@ -800,7 +800,7 @@ export default function Home() {
                             ? formatMoneyInput(String(editing.currentValue))
                             : ""
                         }
-                        placeholder="Si lo dej·s vacÌo, usamos el capital"
+                        placeholder="Si lo dej√°s vac√≠o, usamos el capital"
                         onChange={(event) => {
                           event.target.value = formatMoneyInput(event.target.value);
                         }}
@@ -819,7 +819,7 @@ export default function Home() {
                   </label>
                 </div>
                 <p className="form-hint">
-                  ElegÌ una opciÛn existente o seleccion· ìcrear nuevoî. Nunca
+                  Eleg√≠ una opci√≥n existente o seleccion√° ‚Äúcrear nuevo‚Äù. Nunca
                   se guardan ambas opciones juntas.
                 </p>
                 <div className="modal-actions">
@@ -831,7 +831,7 @@ export default function Home() {
                     Cancelar
                   </button>
                   <button className="primary-button">
-                    {editing ? "Guardar cambios" : "Guardar actualizaciÛn"}
+                    {editing ? "Guardar cambios" : "Guardar actualizaci√≥n"}
                   </button>
                 </div>
               </form>
