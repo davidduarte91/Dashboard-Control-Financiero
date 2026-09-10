@@ -1,31 +1,844 @@
-Ôªø"use client";
+"use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type Currency = "ARS" | "USD" | "USDT";
-type Entry = { id: string; envelope: string; investment: string; account: string; currency: Currency; amount: number; currentValue: number; date: string; kind?: "aporte" | "valuacion" };
+type Entry = {
+  id: string;
+  envelope: string;
+  investment: string;
+  account: string;
+  currency: Currency;
+  amount: number;
+  currentValue: number;
+  date: string;
+  kind?: "aporte" | "retiro" | "valuacion";
+};
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
-const descriptions: Record<string, string> = { FCI: "Fondos comunes de inversi√≥n", Cedears: "Posiciones agrupadas", "Acciones argentinas": "Acciones locales agrupadas", Criptomonedas: "Lemon, Nexo y otros exchanges" };
-const money = (value: number, currency: Currency = "ARS") => new Intl.NumberFormat("es-AR", { style: "currency", currency }).format(value);
-const parseAmount = (value: string) => Number(value.replace(/\./g, "").replace(",", "."));
+const descriptions: Record<string, string> = {
+  FCI: "Fondos comunes de inversiÛn",
+  Cedears: "Posiciones agrupadas",
+  "Acciones argentinas": "Acciones locales agrupadas",
+  Criptomonedas: "Lemon, Nexo y otros exchanges",
+};
+const money = (value: number, currency: Currency = "ARS") =>
+  new Intl.NumberFormat("es-AR", { style: "currency", currency }).format(value);
+const parseAmount = (value: string) =>
+  Number(value.replace(/\./g, "").replace(",", "."));
+const formatMoneyInput = (value: string) => {
+  const sanitized = value.replace(/[^\d,]/g, "");
+  if (!sanitized) return "";
+
+  const [integerPart, decimalPart] = sanitized.split(",");
+  const digits = integerPart.replace(/\./g, "");
+  const formattedInteger = digits
+    ? Number(digits).toLocaleString("es-AR", { maximumFractionDigits: 0 })
+    : "";
+
+  if (decimalPart !== undefined) {
+    return `${formattedInteger},${decimalPart.slice(0, 2)}`;
+  }
+
+  return formattedInteger;
+};
 
 export default function Home() {
-  const [entries, setEntries] = useState<Entry[]>([]), [envelopes, setEnvelopes] = useState<string[]>([]), [investments, setInvestments] = useState(defaults), [accounts, setAccounts] = useState<string[]>([]);
-  const [isModalOpen, setModalOpen] = useState(false), [isDark, setDark] = useState(false), [historyOpen, setHistoryOpen] = useState(false), [hydrated, setHydrated] = useState(false), [today, setToday] = useState("");
-  const [envelopeMode, setEnvelopeMode] = useState("existing"), [investmentMode, setInvestmentMode] = useState("existing"), [accountMode, setAccountMode] = useState("existing"), [editing, setEditing] = useState<Entry | null>(null), [valuation, setValuation] = useState("");
-  useEffect(() => { const timer = window.setTimeout(() => { const read = (key: string) => localStorage.getItem(key); if (read("finanzas-entries")) setEntries(JSON.parse(read("finanzas-entries")!)); if (read("finanzas-envelopes")) setEnvelopes(JSON.parse(read("finanzas-envelopes")!)); if (read("finanzas-investments")) setInvestments(JSON.parse(read("finanzas-investments")!)); if (read("finanzas-accounts")) setAccounts(JSON.parse(read("finanzas-accounts")!)); if (read("finanzas-theme") === "dark") setDark(true); setToday(new Date().toISOString().slice(0, 10)); setHydrated(true); }, 0); return () => window.clearTimeout(timer); }, []);
-  useEffect(() => { if (!hydrated) return; document.documentElement.dataset.theme = isDark ? "dark" : "light"; localStorage.setItem("finanzas-theme", isDark ? "dark" : "light"); }, [isDark, hydrated]);
-  const summary = useMemo(() => { const contributions = entries.filter((entry) => (entry.kind || "aporte") === "aporte"); const capital = contributions.reduce((sum, entry) => sum + entry.amount, 0); const available = contributions.filter((entry) => !entry.investment).reduce((sum, entry) => sum + entry.currentValue, 0); const invested = investments.reduce((sum, name) => { const vals = entries.filter((entry) => entry.investment === name && entry.kind === "valuacion").sort((a, b) => b.date.localeCompare(a.date)); return sum + (vals[0]?.currentValue ?? contributions.filter((entry) => entry.investment === name).reduce((total, entry) => total + entry.currentValue, 0)); }, 0); return { capital, available, current: available + invested }; }, [entries, investments]);
+  const [entries, setEntries] = useState<Entry[]>([]),
+    [envelopes, setEnvelopes] = useState<string[]>([]),
+    [investments, setInvestments] = useState(defaults),
+    [accounts, setAccounts] = useState<string[]>([]);
+  const [isModalOpen, setModalOpen] = useState(false),
+    [isDark, setDark] = useState(false),
+    [historyOpen, setHistoryOpen] = useState(false),
+    [hydrated, setHydrated] = useState(false),
+    [today, setToday] = useState("");
+  const [envelopeMode, setEnvelopeMode] = useState("existing"),
+    [investmentMode, setInvestmentMode] = useState("existing"),
+    [accountMode, setAccountMode] = useState("existing"),
+    [editing, setEditing] = useState<Entry | null>(null),
+    [valuation, setValuation] = useState(""),
+    [movementKind, setMovementKind] = useState<"aporte" | "retiro">("aporte");
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const read = (key: string) => localStorage.getItem(key);
+      if (read("finanzas-entries"))
+        setEntries(JSON.parse(read("finanzas-entries")!));
+      if (read("finanzas-envelopes"))
+        setEnvelopes(JSON.parse(read("finanzas-envelopes")!));
+      if (read("finanzas-investments"))
+        setInvestments(JSON.parse(read("finanzas-investments")!));
+      if (read("finanzas-accounts"))
+        setAccounts(JSON.parse(read("finanzas-accounts")!));
+      if (read("finanzas-theme") === "dark") setDark(true);
+      setToday(new Date().toISOString().slice(0, 10));
+      setHydrated(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  useEffect(() => {
+    if (!hydrated) return;
+    document.documentElement.dataset.theme = isDark ? "dark" : "light";
+    localStorage.setItem("finanzas-theme", isDark ? "dark" : "light");
+  }, [isDark, hydrated]);
+  const summary = useMemo(() => {
+    const contributions = entries.filter(
+      (entry) => (entry.kind || "aporte") === "aporte",
+    );
+    const withdrawals = entries.filter((entry) => entry.kind === "retiro");
+    const capital =
+      contributions.reduce((sum, entry) => sum + entry.amount, 0) -
+      withdrawals.reduce((sum, entry) => sum + entry.amount, 0);
+    const available =
+      contributions
+        .filter((entry) => !entry.investment)
+        .reduce((sum, entry) => sum + entry.currentValue, 0) -
+      withdrawals
+        .filter((entry) => !entry.investment)
+        .reduce((sum, entry) => sum + entry.currentValue, 0);
+    const invested = investments.reduce((sum, name) => {
+      const vals = entries
+        .filter(
+          (entry) => entry.investment === name && entry.kind === "valuacion",
+        )
+        .sort((a, b) => b.date.localeCompare(a.date));
+      const base =
+        vals[0]?.currentValue ??
+        contributions
+          .filter((entry) => entry.investment === name)
+          .reduce((total, entry) => total + entry.currentValue, 0);
+      return (
+        sum +
+        base -
+        withdrawals
+          .filter((entry) => entry.investment === name)
+          .reduce((total, entry) => total + entry.currentValue, 0)
+      );
+    }, 0);
+    return { capital, available, current: available + invested };
+  }, [entries, investments]);
   const gain = summary.current - summary.capital;
-  const envelopeTotals = envelopes.map((name) => ({ name, total: entries.filter((entry) => entry.envelope === name).reduce((sum, entry) => sum + entry.currentValue, 0) }));
-  const openNew = () => { setEditing(null); setValuation(""); setEnvelopeMode(envelopes.length ? "existing" : "new"); setInvestmentMode("existing"); setAccountMode(accounts.length ? "existing" : "new"); setModalOpen(true); };
-  const openEdit = (entry: Entry) => { setEditing(entry); setValuation(""); setEnvelopeMode("existing"); setInvestmentMode("existing"); setAccountMode("existing"); setModalOpen(true); };
-  const saveEntry = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const amount = parseAmount(String(form.get("amount"))); const currentText = String(form.get("currentValue") || ""); const entry: Entry = { id: editing?.id || crypto.randomUUID(), envelope: String(form.get(envelopeMode === "new" ? "newEnvelope" : "envelope") || ""), investment: String(form.get(investmentMode === "new" ? "newInvestment" : "investment") || ""), account: String(form.get(accountMode === "new" ? "newAccount" : "account") || ""), currency: form.get("currency") as Currency, amount, currentValue: currentText ? parseAmount(currentText) : amount, date: String(form.get("date")), kind: editing?.kind || "aporte" }; const next = editing ? entries.map((item) => item.id === entry.id ? entry : item) : [entry, ...entries]; setEntries(next); localStorage.setItem("finanzas-entries", JSON.stringify(next)); [[entry.envelope, envelopes, setEnvelopes, "finanzas-envelopes"], [entry.investment, investments, setInvestments, "finanzas-investments"], [entry.account, accounts, setAccounts, "finanzas-accounts"]].forEach(([value, list, setter, key]) => { if (value && !(list as string[]).includes(value as string)) { const updated = [...list as string[], value as string]; (setter as (value: string[]) => void)(updated); localStorage.setItem(key as string, JSON.stringify(updated)); } }); setModalOpen(false); setEditing(null); event.currentTarget.reset(); };
-  const saveValuation = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const entry: Entry = { id: crypto.randomUUID(), envelope: "", investment: valuation, account: String(form.get("account")), currency: form.get("currency") as Currency, amount: 0, currentValue: parseAmount(String(form.get("currentValue"))), date: String(form.get("date")), kind: "valuacion" }; const next = [entry, ...entries]; setEntries(next); localStorage.setItem("finanzas-entries", JSON.stringify(next)); setModalOpen(false); setValuation(""); };
-  const deleteEntry = (id: string) => { const next = entries.filter((entry) => entry.id !== id); setEntries(next); localStorage.setItem("finanzas-entries", JSON.stringify(next)); };
-  const renameEnvelope = (oldName: string) => { const newName = window.prompt("Nuevo nombre del sobre", oldName)?.trim(); if (!newName || newName === oldName || envelopes.includes(newName)) return; const nextEnvelopes = envelopes.map((name) => name === oldName ? newName : name); const nextEntries = entries.map((entry) => entry.envelope === oldName ? { ...entry, envelope: newName } : entry); setEnvelopes(nextEnvelopes); setEntries(nextEntries); localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes)); localStorage.setItem("finanzas-entries", JSON.stringify(nextEntries)); };
-  const removeEnvelope = (name: string) => { if (!window.confirm(`¬øEliminar el sobre "${name}"? Sus cargas quedar√°n sin sobre.`)) return; const nextEnvelopes = envelopes.filter((item) => item !== name); const nextEntries = entries.map((entry) => entry.envelope === name ? { ...entry, envelope: "" } : entry); setEnvelopes(nextEnvelopes); setEntries(nextEntries); localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes)); localStorage.setItem("finanzas-entries", JSON.stringify(nextEntries)); };
+  const envelopeTotals = envelopes.map((name) => {
+    const items = entries.filter((entry) => entry.envelope === name);
+    const contributions = items
+      .filter((entry) => (entry.kind || "aporte") === "aporte")
+      .reduce((sum, entry) => sum + entry.currentValue, 0);
+    const withdrawals = items
+      .filter((entry) => entry.kind === "retiro")
+      .reduce((sum, entry) => sum + entry.currentValue, 0);
+    return { name, total: contributions - withdrawals };
+  });
+  const openNew = () => {
+    setEditing(null);
+    setValuation("");
+    setMovementKind("aporte");
+    setEnvelopeMode(envelopes.length ? "existing" : "new");
+    setInvestmentMode("existing");
+    setAccountMode(accounts.length ? "existing" : "new");
+    setModalOpen(true);
+  };
+  const openEdit = (entry: Entry) => {
+    setEditing(entry);
+    setValuation("");
+    setMovementKind(entry.kind === "retiro" ? "retiro" : "aporte");
+    setEnvelopeMode("existing");
+    setInvestmentMode("existing");
+    setAccountMode("existing");
+    setModalOpen(true);
+  };
+  const openWithdrawal = (
+    sourceType?: "envelope" | "investment",
+    sourceName?: string,
+  ) => {
+    setEditing(null);
+    setValuation("");
+    setMovementKind("retiro");
+    setEnvelopeMode("existing");
+    setInvestmentMode("existing");
+    setAccountMode(accounts.length ? "existing" : "new");
+    setModalOpen(true);
+    window.setTimeout(() => {
+      if (sourceType === "envelope") {
+        const select = document.querySelector(
+          'select[name="envelope"]',
+        ) as HTMLSelectElement | null;
+        if (select) select.value = sourceName || "";
+      }
+      if (sourceType === "investment") {
+        const select = document.querySelector(
+          'select[name="investment"]',
+        ) as HTMLSelectElement | null;
+        if (select) select.value = sourceName || "";
+      }
+    }, 0);
+  };
+  const saveEntry = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const amount = parseAmount(String(form.get("amount")));
+    const currentText = String(form.get("currentValue") || "");
+    const envelope = String(
+      form.get(envelopeMode === "new" ? "newEnvelope" : "envelope") || "",
+    );
+    const investment = String(
+      form.get(investmentMode === "new" ? "newInvestment" : "investment") || "",
+    );
+    if (movementKind === "retiro" && !envelope && !investment) {
+      window.alert("ElegÌ el sobre o la inversiÛn de donde sale el dinero.");
+      return;
+    }
+    const entry: Entry = {
+      id: editing?.id || crypto.randomUUID(),
+      envelope,
+      investment,
+      account: String(
+        form.get(accountMode === "new" ? "newAccount" : "account") || "",
+      ),
+      currency: form.get("currency") as Currency,
+      amount,
+      currentValue:
+        movementKind === "retiro"
+          ? amount
+          : currentText
+            ? parseAmount(currentText)
+            : amount,
+      date: String(form.get("date")),
+      kind: editing ? editing.kind || "aporte" : movementKind,
+    };
+    const next = editing
+      ? entries.map((item) => (item.id === entry.id ? entry : item))
+      : [entry, ...entries];
+    setEntries(next);
+    localStorage.setItem("finanzas-entries", JSON.stringify(next));
+    [
+      [entry.envelope, envelopes, setEnvelopes, "finanzas-envelopes"],
+      [entry.investment, investments, setInvestments, "finanzas-investments"],
+      [entry.account, accounts, setAccounts, "finanzas-accounts"],
+    ].forEach(([value, list, setter, key]) => {
+      if (value && !(list as string[]).includes(value as string)) {
+        const updated = [...(list as string[]), value as string];
+        (setter as (value: string[]) => void)(updated);
+        localStorage.setItem(key as string, JSON.stringify(updated));
+      }
+    });
+    setModalOpen(false);
+    setEditing(null);
+    event.currentTarget.reset();
+  };
+  const saveValuation = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const entry: Entry = {
+      id: crypto.randomUUID(),
+      envelope: "",
+      investment: valuation,
+      account: String(form.get("account")),
+      currency: form.get("currency") as Currency,
+      amount: 0,
+      currentValue: parseAmount(String(form.get("currentValue"))),
+      date: String(form.get("date")),
+      kind: "valuacion",
+    };
+    const next = [entry, ...entries];
+    setEntries(next);
+    localStorage.setItem("finanzas-entries", JSON.stringify(next));
+    setModalOpen(false);
+    setValuation("");
+  };
+  const deleteEntry = (id: string) => {
+    const next = entries.filter((entry) => entry.id !== id);
+    setEntries(next);
+    localStorage.setItem("finanzas-entries", JSON.stringify(next));
+  };
+  const renameEnvelope = (oldName: string) => {
+    const newName = window.prompt("Nuevo nombre del sobre", oldName)?.trim();
+    if (!newName || newName === oldName || envelopes.includes(newName)) return;
+    const nextEnvelopes = envelopes.map((name) =>
+      name === oldName ? newName : name,
+    );
+    const nextEntries = entries.map((entry) =>
+      entry.envelope === oldName ? { ...entry, envelope: newName } : entry,
+    );
+    setEnvelopes(nextEnvelopes);
+    setEntries(nextEntries);
+    localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes));
+    localStorage.setItem("finanzas-entries", JSON.stringify(nextEntries));
+  };
+  const removeEnvelope = (name: string) => {
+    if (
+      !window.confirm(
+        `øEliminar el sobre "${name}"? Sus cargas quedar·n sin sobre.`,
+      )
+    )
+      return;
+    const nextEnvelopes = envelopes.filter((item) => item !== name);
+    const nextEntries = entries.map((entry) =>
+      entry.envelope === name ? { ...entry, envelope: "" } : entry,
+    );
+    setEnvelopes(nextEnvelopes);
+    setEntries(nextEntries);
+    localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes));
+    localStorage.setItem("finanzas-entries", JSON.stringify(nextEntries));
+  };
 
-  return <div className="dashboard-shell"><aside className="sidebar"><div className="brand-mark"><span>F</span><div>finanzas<small>PERSONALES</small></div></div><p className="nav-label">ESPACIO PERSONAL</p><nav className="main-nav" aria-label="Navegaci√≥n principal"><a className="active" href="#resumen"><b>‚óà</b> Resumen</a><a href="#sobres"><b>‚ñ£</b> Sobres virtuales</a><a href="#inversiones"><b>‚óí</b> Inversiones</a><a href="#actividad"><b>‚â°</b> Historial</a></nav></aside><main className="main-content"><header className="topbar"><div><p className="eyebrow">MI ESPACIO FINANCIERO</p><h1>Resumen general</h1></div><button className="icon-button" aria-label="Cambiar tema" onClick={() => setDark(!isDark)}>{isDark ? "‚òÄ" : "‚òæ"}</button></header><section className="welcome-row" id="resumen"><div><h2>Tu patrimonio, en perspectiva.</h2><p>Estos son tus n√∫meros al d√≠a de hoy.</p></div><button className="primary-button" onClick={openNew}>+ Registrar actualizaci√≥n</button></section><section className="kpi-grid"><article className="kpi-card featured"><div className="card-heading"><span>Patrimonio total</span><i>ARS</i></div><strong>{money(summary.current)}</strong><p className="muted">{entries.length} cargas registradas</p></article><article className="kpi-card"><div className="card-heading"><span>Dinero disponible</span><i className="soft-green">ARS</i></div><strong>{money(summary.available)}</strong><p className="positive">En sobres virtuales</p></article><article className="kpi-card"><div className="card-heading"><span>Capital invertido</span><i className="soft-blue">ARS</i></div><strong>{money(summary.capital - summary.available)}</strong><p className="muted">En inversiones</p></article><article className="kpi-card"><div className="card-heading"><span>Rendimiento acumulado</span><i className="soft-orange">ARS</i></div><strong>{money(gain)}</strong><p className="muted">{summary.capital ? `${((gain / summary.capital) * 100).toFixed(2)}% acumulado` : "Esperando tu primera carga"}</p></article></section><section className="content-grid"><article className="panel envelopes-panel" id="sobres"><div className="panel-header"><div><h3>Tus sobres</h3><p>Saldos acumulados por objetivo</p></div><button className="text-button" onClick={openNew}>Nuevo sobre ‚Üí</button></div>{envelopeTotals.length ? <div className="envelope-list">{envelopeTotals.map((item) => <div className="envelope-item" key={item.name}><span className="envelope-icon">‚ñ£</span><div><strong>{item.name}</strong><small>Saldo acumulado</small></div><b>{money(item.total)}</b><div className="envelope-actions"><button type="button" className="edit-button" aria-label={`Renombrar ${item.name}`} onClick={() => renameEnvelope(item.name)}>‚úé</button><button type="button" className="delete-button" aria-label={`Eliminar ${item.name}`} onClick={() => removeEnvelope(item.name)}>√ó</button></div></div>)}</div> : <div className="empty-state compact-empty"><strong>Todav√≠a no ten√©s sobres</strong><p>Cre√° uno desde ‚ÄúRegistrar actualizaci√≥n‚Äù.</p></div>}</article><article className="panel activity-panel" id="actividad"><div className="panel-header"><div><h3>Actividad reciente</h3><p>Tu registro de cargas</p></div><button className="text-button" onClick={() => setHistoryOpen(!historyOpen)}>{historyOpen ? "Ocultar historial" : "Ver historial ‚Üí"}</button></div>{entries.length ? <div className="activity-list">{(historyOpen ? entries : entries.slice(0, 3)).map((entry) => <div className="activity-item" key={entry.id}><span className="activity-dot" /><div><strong>{entry.envelope || entry.investment}</strong><small>{entry.kind === "valuacion" ? "Valuaci√≥n" : "Aporte"} ¬∑ {entry.account} ¬∑ {entry.date}</small></div><b>{money(entry.currentValue, entry.currency)}</b><button className="edit-button" onClick={() => openEdit(entry)} aria-label="Editar carga">‚úé</button><button className="delete-button" onClick={() => deleteEntry(entry.id)} aria-label="Borrar carga">√ó</button></div>)}</div> : <div className="empty-state"><strong>A√∫n no hay cargas</strong></div>}</article></section><section className="panel investments-panel" id="inversiones"><div className="panel-header"><div><h3>Inversiones</h3><p>Capital y rendimiento por categor√≠a</p></div></div>{investments.map((name) => { const items = entries.filter((entry) => entry.investment === name && (entry.kind || "aporte") === "aporte"); const capital = items.reduce((sum, entry) => sum + entry.amount, 0); const valuationItems = entries.filter((entry) => entry.investment === name && entry.kind === "valuacion").sort((a, b) => b.date.localeCompare(a.date)); const current = valuationItems[0]?.currentValue ?? items.reduce((sum, entry) => sum + entry.currentValue, 0); return <div className="investment-row" key={name}><div className="investment-name"><span className="investment-icon">‚óà</span><div><strong>{name}</strong><small>{descriptions[name] || "Categor√≠a personalizada"}</small></div></div><div><small>Capital</small><strong>{money(capital)}</strong></div><div><small>Rendimiento</small><strong className={current - capital >= 0 ? "positive" : "negative"}>{money(current - capital)}</strong></div><div><small>Actualizado</small><button className="text-button" onClick={() => { setValuation(name); setEditing(null); setModalOpen(true); }}>{items.length ? "Actualizar" : "Sin datos"}</button></div></div>; })}</section></main>{isModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setModalOpen(false)}><section className="modal" role="dialog" aria-modal="true"><div className="modal-header"><div><p className="eyebrow">{valuation ? "VALUACI√ìN" : "CARGA MANUAL"}</p><h2>{valuation ? `Actualizar ${valuation}` : editing ? "Editar actualizaci√≥n" : "Registrar actualizaci√≥n"}</h2></div><button className="close-button" onClick={() => { setModalOpen(false); setValuation(""); }} aria-label="Cerrar">√ó</button></div>{valuation ? <form onSubmit={saveValuation}><div className="form-grid"><label>Valor actual<input name="currentValue" required inputMode="decimal" placeholder="310.000,50" /></label><label>Cuenta o plataforma<input name="account" required placeholder="Brubank, Lemon o Nexo" /></label><label>Moneda<select name="currency" defaultValue="ARS"><option>ARS</option><option>USD</option><option>USDT</option></select></label><label>Fecha<input name="date" required type="date" value={today} readOnly /></label></div><p className="form-hint">Esta valuaci√≥n no modifica el capital aportado.</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setValuation("")}>Cancelar</button><button className="primary-button">Guardar valuaci√≥n</button></div></form> : <form onSubmit={saveEntry}><div className="form-grid"><label>Sobre<select name="envelope" defaultValue={editing?.envelope || ""} disabled={envelopeMode === "new"} onChange={(event) => setEnvelopeMode(event.target.value === "__new__" ? "new" : "existing")}><option value="">Elegir sobre</option>{envelopes.map((name) => <option key={name}>{name}</option>)}<option value="__new__">+ Crear nuevo sobre...</option></select></label><label>Nombre del sobre nuevo <span className="optional-label">(opcional)</span><input name="newEnvelope" disabled={envelopeMode !== "new"} placeholder="Ej. Tarjeta cr√©dito Septiembre" /></label><label>Inversi√≥n<select name="investment" defaultValue={editing?.investment || ""} disabled={investmentMode === "new"} onChange={(event) => setInvestmentMode(event.target.value === "__new__" ? "new" : "existing")}><option value="">Elegir inversi√≥n</option>{investments.map((name) => <option key={name}>{name}</option>)}<option value="__new__">+ Crear nueva categor√≠a...</option></select></label><label>Nombre de categor√≠a nueva <span className="optional-label">(opcional)</span><input name="newInvestment" disabled={investmentMode !== "new"} placeholder="Ej. FCI Galicia" /></label><label>Cuenta o plataforma<select name="account" defaultValue={editing?.account || ""} disabled={accountMode === "new"} onChange={(event) => setAccountMode(event.target.value === "__new__" ? "new" : "existing")}><option value="">Elegir plataforma</option>{accounts.map((name) => <option key={name}>{name}</option>)}<option value="__new__">+ Agregar nueva plataforma...</option></select></label><label>Nombre de plataforma nueva <span className="optional-label">(opcional)</span><input name="newAccount" disabled={accountMode !== "new"} placeholder="Ej. Brubank, Lemon o Nexo" /></label><label>Moneda<select name="currency" defaultValue={editing?.currency || "ARS"}><option>ARS</option><option>USD</option><option>USDT</option></select></label><label>Capital aportado<input name="amount" required inputMode="decimal" defaultValue={editing?.amount || ""} placeholder="10.000,50" /></label><label>Valor actual <span className="optional-label">(opcional)</span><input name="currentValue" inputMode="decimal" defaultValue={editing?.currentValue || ""} placeholder="Si lo dej√°s vac√≠o, usamos el capital" /></label><label>Fecha<input name="date" required type="date" value={editing?.date || today} readOnly /></label></div><p className="form-hint">Eleg√≠ una opci√≥n existente o seleccion√° ‚Äúcrear nuevo‚Äù. Nunca se guardan ambas opciones juntas.</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModalOpen(false)}>Cancelar</button><button className="primary-button">{editing ? "Guardar cambios" : "Guardar actualizaci√≥n"}</button></div></form>}</section></div>}</div>;
+  return (
+    <div className="dashboard-shell">
+      <aside className="sidebar">
+        <div className="brand-mark">
+          <span>F</span>
+          <div>
+            finanzas<small>PERSONALES</small>
+          </div>
+        </div>
+        <p className="nav-label">ESPACIO PERSONAL</p>
+        <nav className="main-nav" aria-label="NavegaciÛn principal">
+          <a className="active" href="#resumen">
+            <b>?</b> Resumen
+          </a>
+          <a href="#sobres">
+            <b>?</b> Sobres virtuales
+          </a>
+          <a href="#inversiones">
+            <b>?</b> Inversiones
+          </a>
+          <a href="#actividad">
+            <b>=</b> Historial
+          </a>
+        </nav>
+      </aside>
+      <main className="main-content">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">MI ESPACIO FINANCIERO</p>
+            <h1>Resumen general</h1>
+          </div>
+          <button
+            className="icon-button"
+            aria-label="Cambiar tema"
+            onClick={() => setDark(!isDark)}
+          >
+            {isDark ? "?" : "?"}
+          </button>
+        </header>
+        <section className="welcome-row" id="resumen">
+          <div>
+            <h2>Tu patrimonio, en perspectiva.</h2>
+            <p>Estos son tus n˙meros al dÌa de hoy.</p>
+          </div>
+          <button className="primary-button" onClick={openNew}>
+            + Registrar actualizaciÛn
+          </button>
+        </section>
+        <section className="kpi-grid">
+          <article className="kpi-card featured">
+            <div className="card-heading">
+              <span>Patrimonio total</span>
+              <i>ARS</i>
+            </div>
+            <strong>{money(summary.current)}</strong>
+            <p className="muted">{entries.length} cargas registradas</p>
+          </article>
+          <article className="kpi-card">
+            <div className="card-heading">
+              <span>Dinero disponible</span>
+              <i className="soft-green">ARS</i>
+            </div>
+            <strong>{money(summary.available)}</strong>
+            <p className="positive">En sobres virtuales</p>
+          </article>
+          <article className="kpi-card">
+            <div className="card-heading">
+              <span>Capital invertido</span>
+              <i className="soft-blue">ARS</i>
+            </div>
+            <strong>{money(summary.capital - summary.available)}</strong>
+            <p className="muted">En inversiones</p>
+          </article>
+          <article className="kpi-card">
+            <div className="card-heading">
+              <span>Rendimiento acumulado</span>
+              <i className="soft-orange">ARS</i>
+            </div>
+            <strong>{money(gain)}</strong>
+            <p className="muted">
+              {summary.capital
+                ? `${((gain / summary.capital) * 100).toFixed(2)}% acumulado`
+                : "Esperando tu primera carga"}
+            </p>
+          </article>
+        </section>
+        <section className="content-grid">
+          <article className="panel envelopes-panel" id="sobres">
+            <div className="panel-header">
+              <div>
+                <h3>Tus sobres</h3>
+                <p>Saldos acumulados por objetivo</p>
+              </div>
+              <button className="text-button" onClick={openNew}>
+                Nuevo sobre ?
+              </button>
+            </div>
+            {envelopeTotals.length ? (
+              <div className="envelope-list">
+                {envelopeTotals.map((item) => (
+                  <div className="envelope-item" key={item.name}>
+                    <span className="envelope-icon">?</span>
+                    <div className="envelope-details">
+                      <strong>{item.name}</strong>
+                      <div className="envelope-balance-line">
+                        <small>Saldo acumulado</small>
+                        <b>{money(item.total)}</b>
+                      </div>
+                    </div>
+                    <div className="envelope-actions">
+                      <button
+                        type="button"
+                        className="action-button"
+                        onClick={() => openWithdrawal("envelope", item.name)}
+                      >
+                        Extraer
+                      </button>
+                      <button
+                        type="button"
+                        className="edit-button"
+                        aria-label={`Renombrar ${item.name}`}
+                        onClick={() => renameEnvelope(item.name)}
+                      >
+                        ?
+                      </button>
+                      <button
+                        type="button"
+                        className="delete-button"
+                        aria-label={`Eliminar ${item.name}`}
+                        onClick={() => removeEnvelope(item.name)}
+                      >
+                        ◊
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state compact-empty">
+                <strong>TodavÌa no tenÈs sobres</strong>
+                <p>Cre· uno desde ìRegistrar actualizaciÛnî.</p>
+              </div>
+            )}
+          </article>
+          <article className="panel activity-panel" id="actividad">
+            <div className="panel-header">
+              <div>
+                <h3>Actividad reciente</h3>
+                <p>Tu registro de cargas</p>
+              </div>
+              <button
+                className="text-button"
+                onClick={() => setHistoryOpen(!historyOpen)}
+              >
+                {historyOpen ? "Ocultar historial" : "Ver historial ?"}
+              </button>
+            </div>
+            {entries.length ? (
+              <div className="activity-list">
+                {(historyOpen ? entries : entries.slice(0, 3)).map((entry) => {
+                  const isWithdrawal = entry.kind === "retiro";
+                  const label =
+                    entry.kind === "valuacion"
+                      ? "ValuaciÛn"
+                      : isWithdrawal
+                        ? "Retiro"
+                        : "Aporte";
+                  const amount =
+                    isWithdrawal ? -entry.currentValue : entry.currentValue;
+                  return (
+                    <div className="activity-item" key={entry.id}>
+                      <span className="activity-dot" />
+                      <div>
+                        <strong>{entry.envelope || entry.investment}</strong>
+                        <small>
+                          {label} ∑ {entry.account} ∑ {entry.date}
+                        </small>
+                      </div>
+                      <b className={isWithdrawal ? "negative" : ""}>
+                        {money(amount, entry.currency)}
+                      </b>
+                      <button
+                        className="edit-button"
+                        onClick={() => openEdit(entry)}
+                        aria-label="Editar carga"
+                      >
+                        ?
+                      </button>
+                      <button
+                        className="delete-button"
+                        onClick={() => deleteEntry(entry.id)}
+                        aria-label="Borrar carga"
+                      >
+                        ◊
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <strong>A˙n no hay cargas</strong>
+              </div>
+            )}
+          </article>
+        </section>
+        <section className="panel investments-panel" id="inversiones">
+          <div className="panel-header">
+            <div>
+              <h3>Inversiones</h3>
+              <p>Capital y rendimiento por categorÌa</p>
+            </div>
+          </div>
+          {investments.map((name) => {
+            const items = entries.filter(
+              (entry) =>
+                entry.investment === name &&
+                (entry.kind || "aporte") === "aporte",
+            );
+            const withdrawalItems = entries.filter(
+              (entry) => entry.investment === name && entry.kind === "retiro",
+            );
+            const capital =
+              items.reduce((sum, entry) => sum + entry.amount, 0) -
+              withdrawalItems.reduce((sum, entry) => sum + entry.amount, 0);
+            const valuationItems = entries
+              .filter(
+                (entry) =>
+                  entry.investment === name && entry.kind === "valuacion",
+              )
+              .sort((a, b) => b.date.localeCompare(a.date));
+            const current =
+              (valuationItems[0]?.currentValue ??
+                items.reduce((sum, entry) => sum + entry.currentValue, 0)) -
+              withdrawalItems.reduce(
+                (sum, entry) => sum + entry.currentValue,
+                0,
+              );
+            return (
+              <div className="investment-row" key={name}>
+                <div className="investment-name">
+                  <span className="investment-icon">?</span>
+                  <div>
+                    <strong>{name}</strong>
+                    <small>
+                      {descriptions[name] || "CategorÌa personalizada"}
+                    </small>
+                  </div>
+                </div>
+                <div>
+                  <small>Capital</small>
+                  <strong>{money(capital)}</strong>
+                </div>
+                <div>
+                  <small>Rendimiento</small>
+                  <strong
+                    className={current - capital >= 0 ? "positive" : "negative"}
+                  >
+                    {money(current - capital)}
+                  </strong>
+                </div>
+                <div className="investment-actions">
+                  <button
+                    className="text-button"
+                    onClick={() => {
+                      setValuation(name);
+                      setEditing(null);
+                      setModalOpen(true);
+                    }}
+                  >
+                    {items.length ? "Actualizar" : "Sin datos"}
+                  </button>
+                  <button
+                    type="button"
+                    className="action-button"
+                    onClick={() => openWithdrawal("investment", name)}
+                  >
+                    Extraer
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      </main>
+      {isModalOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) =>
+            event.target === event.currentTarget && setModalOpen(false)
+          }
+        >
+          <section className="modal" role="dialog" aria-modal="true">
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">
+                  {valuation ? "VALUACI”N" : "CARGA MANUAL"}
+                </p>
+                <h2>
+                  {valuation
+                    ? `Actualizar ${valuation}`
+                    : editing
+                      ? "Editar actualizaciÛn"
+                      : "Registrar actualizaciÛn"}
+                </h2>
+              </div>
+              <button
+                className="close-button"
+                onClick={() => {
+                  setModalOpen(false);
+                  setValuation("");
+                }}
+                aria-label="Cerrar"
+              >
+                ◊
+              </button>
+            </div>
+            {valuation ? (
+              <form onSubmit={saveValuation}>
+                <div className="form-grid">
+                  <label>
+                    Valor actual
+                    <input
+                      name="currentValue"
+                      required
+                      inputMode="decimal"
+                      placeholder="310.000,50"
+                      onChange={(event) => {
+                        event.target.value = formatMoneyInput(event.target.value);
+                      }}
+                    />
+                  </label>
+                  <label>
+                    Cuenta o plataforma
+                    <input
+                      name="account"
+                      required
+                      placeholder="Brubank, Lemon o Nexo"
+                    />
+                  </label>
+                  <label>
+                    Moneda
+                    <select name="currency" defaultValue="ARS">
+                      <option>ARS</option>
+                      <option>USD</option>
+                      <option>USDT</option>
+                    </select>
+                  </label>
+                  <label>
+                    Fecha
+                    <input
+                      name="date"
+                      required
+                      type="date"
+                      value={today}
+                      readOnly
+                    />
+                  </label>
+                </div>
+                <p className="form-hint">
+                  Esta valuaciÛn no modifica el capital aportado.
+                </p>
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setValuation("")}
+                  >
+                    Cancelar
+                  </button>
+                  <button className="primary-button">Guardar valuaciÛn</button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={saveEntry}>
+                <div className="form-grid">
+                  <label>
+                    Tipo de movimiento
+                    <select
+                      value={movementKind}
+                      onChange={(event) =>
+                        setMovementKind(
+                          event.target.value as "aporte" | "retiro",
+                        )
+                      }
+                      disabled={Boolean(editing)}
+                    >
+                      <option value="aporte">Ingreso de dinero</option>
+                      <option value="retiro">Retiro de dinero</option>
+                    </select>
+                  </label>
+                  <label>
+                    {movementKind === "retiro" ? "Sobre de origen" : "Sobre"}
+                    <select
+                      name="envelope"
+                      defaultValue={editing?.envelope || ""}
+                      disabled={envelopeMode === "new"}
+                      onChange={(event) =>
+                        setEnvelopeMode(
+                          event.target.value === "__new__" ? "new" : "existing",
+                        )
+                      }
+                    >
+                      <option value="">Elegir sobre</option>
+                      {envelopes.map((name) => (
+                        <option key={name}>{name}</option>
+                      ))}
+                      <option value="__new__">+ Crear nuevo sobre...</option>
+                    </select>
+                  </label>
+                  <label>
+                    Nombre del sobre nuevo{" "}
+                    <span className="optional-label">(opcional)</span>
+                    <input
+                      name="newEnvelope"
+                      disabled={envelopeMode !== "new"}
+                      placeholder="Ej. Tarjeta crÈdito Septiembre"
+                    />
+                  </label>
+                  <label>
+                    InversiÛn
+                    <select
+                      name="investment"
+                      defaultValue={editing?.investment || ""}
+                      disabled={investmentMode === "new"}
+                      onChange={(event) =>
+                        setInvestmentMode(
+                          event.target.value === "__new__" ? "new" : "existing",
+                        )
+                      }
+                    >
+                      <option value="">Elegir inversiÛn</option>
+                      {investments.map((name) => (
+                        <option key={name}>{name}</option>
+                      ))}
+                      <option value="__new__">
+                        + Crear nueva categorÌa...
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    Nombre de categorÌa nueva{" "}
+                    <span className="optional-label">(opcional)</span>
+                    <input
+                      name="newInvestment"
+                      disabled={investmentMode !== "new"}
+                      placeholder="Ej. FCI Galicia"
+                    />
+                  </label>
+                  <label>
+                    Cuenta o plataforma
+                    <select
+                      name="account"
+                      defaultValue={editing?.account || ""}
+                      disabled={accountMode === "new"}
+                      onChange={(event) =>
+                        setAccountMode(
+                          event.target.value === "__new__" ? "new" : "existing",
+                        )
+                      }
+                    >
+                      <option value="">Elegir plataforma</option>
+                      {accounts.map((name) => (
+                        <option key={name}>{name}</option>
+                      ))}
+                      <option value="__new__">
+                        + Agregar nueva plataforma...
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    Nombre de plataforma nueva{" "}
+                    <span className="optional-label">(opcional)</span>
+                    <input
+                      name="newAccount"
+                      disabled={accountMode !== "new"}
+                      placeholder="Ej. Brubank, Lemon o Nexo"
+                    />
+                  </label>
+                  <label>
+                    Moneda
+                    <select
+                      name="currency"
+                      defaultValue={editing?.currency || "ARS"}
+                    >
+                      <option>ARS</option>
+                      <option>USD</option>
+                      <option>USDT</option>
+                    </select>
+                  </label>
+                  <label>
+                    {movementKind === "retiro"
+                      ? "Cantidad a retirar"
+                      : "Capital aportado"}
+                    <input
+                      name="amount"
+                      required
+                      inputMode="decimal"
+                      defaultValue={
+                        editing?.amount ? formatMoneyInput(String(editing.amount)) : ""
+                      }
+                      placeholder="10.000,50"
+                      onChange={(event) => {
+                        event.target.value = formatMoneyInput(event.target.value);
+                      }}
+                    />
+                  </label>
+                  {movementKind !== "retiro" && (
+                    <label>
+                      Valor actual{" "}
+                      <span className="optional-label">(opcional)</span>
+                      <input
+                        name="currentValue"
+                        inputMode="decimal"
+                        defaultValue={
+                          editing?.currentValue
+                            ? formatMoneyInput(String(editing.currentValue))
+                            : ""
+                        }
+                        placeholder="Si lo dej·s vacÌo, usamos el capital"
+                        onChange={(event) => {
+                          event.target.value = formatMoneyInput(event.target.value);
+                        }}
+                      />
+                    </label>
+                  )}
+                  <label>
+                    Fecha
+                    <input
+                      name="date"
+                      required
+                      type="date"
+                      value={editing?.date || today}
+                      readOnly
+                    />
+                  </label>
+                </div>
+                <p className="form-hint">
+                  ElegÌ una opciÛn existente o seleccion· ìcrear nuevoî. Nunca
+                  se guardan ambas opciones juntas.
+                </p>
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setModalOpen(false)}
+                  >
+                    Cancelar
+                  </button>
+                  <button className="primary-button">
+                    {editing ? "Guardar cambios" : "Guardar actualizaciÛn"}
+                  </button>
+                </div>
+              </form>
+            )}
+          </section>
+        </div>
+      )}
+    </div>
+  );
 }
-
