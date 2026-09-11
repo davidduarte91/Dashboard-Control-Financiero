@@ -1,6 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
 
 type Currency = "ARS" | "USD" | "USDT";
 type Entry = {
@@ -58,28 +60,203 @@ export default function Home() {
     [editing, setEditing] = useState<Entry | null>(null),
     [valuation, setValuation] = useState(""),
     [movementKind, setMovementKind] = useState<"aporte" | "retiro">("aporte");
+  const [user, setUser] = useState<User | null>(null),
+    [authLoading, setAuthLoading] = useState(true),
+    [authMode, setAuthMode] = useState<"login" | "signup">("login"),
+    [authEmail, setAuthEmail] = useState(""),
+    [authPassword, setAuthPassword] = useState(""),
+    [authError, setAuthError] = useState(""),
+    [syncStatus, setSyncStatus] = useState<"local" | "synced" | "error">("local");
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const read = (key: string) => localStorage.getItem(key);
-      if (read("finanzas-entries"))
-        setEntries(JSON.parse(read("finanzas-entries")!));
-      if (read("finanzas-envelopes"))
-        setEnvelopes(JSON.parse(read("finanzas-envelopes")!));
-      if (read("finanzas-investments"))
-        setInvestments(JSON.parse(read("finanzas-investments")!));
-      if (read("finanzas-accounts"))
-        setAccounts(JSON.parse(read("finanzas-accounts")!));
-      if (read("finanzas-theme") === "dark") setDark(true);
+    const readLocal = (key: string) => {
+      const value = localStorage.getItem(key);
+      return value ? JSON.parse(value) : null;
+    };
+    const load = async () => {
+      const { data } = await supabase.auth.getSession();
+      const sessionUser = data.session?.user ?? null;
+      setUser(sessionUser);
+      if (sessionUser) {
+        const [entryResult, listResult] = await Promise.all([
+          supabase
+            .from("financial_entries")
+            .select("id, envelope, investment, account, currency, amount, current_value, entry_date, kind")
+            .eq("user_id", sessionUser.id)
+            .order("entry_date", { ascending: false }),
+          supabase.from("financial_lists").select("envelopes, investments, accounts").eq("user_id", sessionUser.id).maybeSingle(),
+        ]);
+        if (entryResult.error || listResult.error) {
+          setEntries(readLocal("finanzas-entries") || []);
+          setEnvelopes(readLocal("finanzas-envelopes") || []);
+          setInvestments(readLocal("finanzas-investments") || defaults);
+          setAccounts(readLocal("finanzas-accounts") || []);
+          const error = entryResult.error || listResult.error;
+          setSyncStatus("error");
+          setAuthError(`No se pudo sincronizar con Supabase: ${error?.message || "error desconocido"}`);
+        } else {
+          const cloudEntries = (entryResult.data || []).map((row) => ({
+            id: row.id,
+            envelope: row.envelope,
+            investment: row.investment,
+            account: row.account,
+            currency: row.currency as Currency,
+            amount: Number(row.amount),
+            currentValue:
+              Number(row.current_value) ||
+              (row.kind === "aporte" ? Number(row.amount) : 0),
+            date: row.entry_date,
+            kind: row.kind as Entry["kind"],
+          }));
+          const localEntries = readLocal("finanzas-entries") || [];
+          const localEnvelopes = readLocal("finanzas-envelopes") || [];
+          const localInvestments = readLocal("finanzas-investments") || defaults;
+          const localAccounts = readLocal("finanzas-accounts") || [];
+          const shouldMigrate = cloudEntries.length === 0 && localEntries.length > 0;
+          const loadedEntries = shouldMigrate ? localEntries : cloudEntries;
+          const loadedLists = listResult.data || {
+            envelopes: localEnvelopes,
+            investments: localInvestments,
+            accounts: localAccounts,
+          };
+          setEntries(loadedEntries);
+          setEnvelopes(loadedLists.envelopes);
+          setInvestments(loadedLists.investments);
+          setAccounts(loadedLists.accounts);
+          if (shouldMigrate) {
+            const { error: entriesError } = await supabase.from("financial_entries").upsert(
+              localEntries.map((entry: Entry) => ({
+                id: entry.id,
+                user_id: sessionUser.id,
+                envelope: entry.envelope,
+                investment: entry.investment,
+                account: entry.account,
+                currency: entry.currency,
+                amount: entry.amount,
+                current_value: entry.currentValue,
+                entry_date: entry.date,
+                kind: entry.kind || "aporte",
+              })),
+            );
+            const { error: listsError } = await supabase.from("financial_lists").upsert({
+              user_id: sessionUser.id,
+              envelopes: localEnvelopes,
+              investments: localInvestments,
+              accounts: localAccounts,
+            });
+            if (entriesError || listsError) {
+              const error = entriesError || listsError;
+              setSyncStatus("error");
+              setAuthError(`No se pudo migrar a Supabase: ${error?.message}`);
+            } else {
+              setSyncStatus("synced");
+            }
+          } else {
+            setSyncStatus("synced");
+          }
+        }
+      } else {
+        setEntries(readLocal("finanzas-entries") || []);
+        setEnvelopes(readLocal("finanzas-envelopes") || []);
+        setInvestments(readLocal("finanzas-investments") || defaults);
+        setAccounts(readLocal("finanzas-accounts") || []);
+      }
+      if (localStorage.getItem("finanzas-theme") === "dark") setDark(true);
       setToday(new Date().toISOString().slice(0, 10));
       setHydrated(true);
-    }, 0);
-    return () => window.clearTimeout(timer);
+      setAuthLoading(false);
+    };
+    void load();
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => listener.subscription.unsubscribe();
   }, []);
   useEffect(() => {
     if (!hydrated) return;
     document.documentElement.dataset.theme = isDark ? "dark" : "light";
     localStorage.setItem("finanzas-theme", isDark ? "dark" : "light");
   }, [isDark, hydrated]);
+  const persistEntries = async (next: Entry[]) => {
+    setEntries(next);
+    localStorage.setItem("finanzas-entries", JSON.stringify(next));
+    if (user) {
+      const { data: remoteEntries, error: readError } = await supabase
+        .from("financial_entries")
+        .select("id")
+        .eq("user_id", user.id);
+      if (readError) {
+        setSyncStatus("error");
+        setAuthError(`No se pudo leer el historial: ${readError.message}`);
+        return;
+      }
+      const { error: upsertError } = await supabase.from("financial_entries").upsert(
+        next.map((entry) => ({
+          id: entry.id,
+          user_id: user.id,
+          envelope: entry.envelope,
+          investment: entry.investment,
+          account: entry.account,
+          currency: entry.currency,
+          amount: entry.amount,
+          current_value: entry.currentValue,
+          entry_date: entry.date,
+          kind: entry.kind || "aporte",
+        })),
+      );
+      if (upsertError) {
+        setSyncStatus("error");
+        setAuthError(`No se pudo guardar el historial: ${upsertError.message}`);
+        return;
+      }
+      setSyncStatus("synced");
+      const nextIds = new Set(next.map((entry) => entry.id));
+      const removedIds = (remoteEntries || [])
+        .map((entry) => entry.id)
+        .filter((id) => !nextIds.has(id));
+      if (!removedIds.length) return;
+      const { error: deleteError } = await supabase
+        .from("financial_entries")
+        .delete()
+        .eq("user_id", user.id)
+        .in("id", removedIds);
+      if (deleteError) {
+        setSyncStatus("error");
+        setAuthError(`No se pudieron quitar registros borrados: ${deleteError.message}`);
+      }
+    }
+  };
+  const persistLists = async (nextEnvelopes: string[], nextInvestments: string[], nextAccounts: string[]) => {
+    setEnvelopes(nextEnvelopes);
+    setInvestments(nextInvestments);
+    setAccounts(nextAccounts);
+    localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes));
+    localStorage.setItem("finanzas-investments", JSON.stringify(nextInvestments));
+    localStorage.setItem("finanzas-accounts", JSON.stringify(nextAccounts));
+    if (user) {
+      const { error } = await supabase.from("financial_lists").upsert({
+        user_id: user.id,
+        envelopes: nextEnvelopes,
+        investments: nextInvestments,
+        accounts: nextAccounts,
+      });
+      if (error) {
+        setSyncStatus("error");
+        setAuthError(`No se pudieron guardar las listas: ${error.message}`);
+      } else {
+        setSyncStatus("synced");
+      }
+    }
+  };
+  const submitAuth = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAuthError("");
+    const result = authMode === "login"
+      ? await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword })
+      : await supabase.auth.signUp({ email: authEmail, password: authPassword });
+    if (result.error) setAuthError(result.error.message);
+    else if (authMode === "signup" && !result.data.session) setAuthError("Revisa tu correo para confirmar la cuenta.");
+    else window.location.reload();
+  };
   const summary = useMemo(() => {
     const contributions = entries.filter(
       (entry) => (entry.kind || "aporte") === "aporte",
@@ -207,19 +384,17 @@ export default function Home() {
     const next = editing
       ? entries.map((item) => (item.id === entry.id ? entry : item))
       : [entry, ...entries];
-    setEntries(next);
-    localStorage.setItem("finanzas-entries", JSON.stringify(next));
-    [
-      [entry.envelope, envelopes, setEnvelopes, "finanzas-envelopes"],
-      [entry.investment, investments, setInvestments, "finanzas-investments"],
-      [entry.account, accounts, setAccounts, "finanzas-accounts"],
-    ].forEach(([value, list, setter, key]) => {
-      if (value && !(list as string[]).includes(value as string)) {
-        const updated = [...(list as string[]), value as string];
-        (setter as (value: string[]) => void)(updated);
-        localStorage.setItem(key as string, JSON.stringify(updated));
-      }
-    });
+    void persistEntries(next);
+    const nextEnvelopes = entry.envelope && !envelopes.includes(entry.envelope)
+      ? [...envelopes, entry.envelope]
+      : envelopes;
+    const nextInvestments = entry.investment && !investments.includes(entry.investment)
+      ? [...investments, entry.investment]
+      : investments;
+    const nextAccounts = entry.account && !accounts.includes(entry.account)
+      ? [...accounts, entry.account]
+      : accounts;
+    void persistLists(nextEnvelopes, nextInvestments, nextAccounts);
     setModalOpen(false);
     setEditing(null);
     event.currentTarget.reset();
@@ -239,15 +414,13 @@ export default function Home() {
       kind: "valuacion",
     };
     const next = [entry, ...entries];
-    setEntries(next);
-    localStorage.setItem("finanzas-entries", JSON.stringify(next));
+    void persistEntries(next);
     setModalOpen(false);
     setValuation("");
   };
   const deleteEntry = (id: string) => {
     const next = entries.filter((entry) => entry.id !== id);
-    setEntries(next);
-    localStorage.setItem("finanzas-entries", JSON.stringify(next));
+    void persistEntries(next);
   };
   const renameEnvelope = (oldName: string) => {
     const newName = window.prompt("Nuevo nombre del sobre", oldName)?.trim();
@@ -259,9 +432,8 @@ export default function Home() {
       entry.envelope === oldName ? { ...entry, envelope: newName } : entry,
     );
     setEnvelopes(nextEnvelopes);
-    setEntries(nextEntries);
-    localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes));
-    localStorage.setItem("finanzas-entries", JSON.stringify(nextEntries));
+    void persistEntries(nextEntries);
+    void persistLists(nextEnvelopes, investments, accounts);
   };
   const removeEnvelope = (name: string) => {
     if (
@@ -274,11 +446,46 @@ export default function Home() {
     const nextEntries = entries.map((entry) =>
       entry.envelope === name ? { ...entry, envelope: "" } : entry,
     );
-    setEnvelopes(nextEnvelopes);
-    setEntries(nextEntries);
-    localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes));
-    localStorage.setItem("finanzas-entries", JSON.stringify(nextEntries));
+    void persistEntries(nextEntries);
+    void persistLists(nextEnvelopes, investments, accounts);
   };
+
+  if (authLoading) {
+    return <main className="auth-shell">Cargando tu espacio financiero...</main>;
+  }
+
+  if (!user) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-panel">
+          <div className="brand-mark">
+            <span>F</span>
+            <div>
+              finanzas<small>PERSONALES</small>
+            </div>
+          </div>
+          <p className="eyebrow">ESPACIO FINANCIERO PRIVADO</p>
+          <h1>{authMode === "login" ? "Ingresá a tu cuenta" : "Crear tu cuenta"}</h1>
+          <p className="auth-copy">Tus registros quedarán sincronizados entre tu computadora y tu celular.</p>
+          <form className="auth-form" onSubmit={submitAuth}>
+            <label>
+              Correo electrónico
+              <input type="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} />
+            </label>
+            <label>
+              Contraseña
+              <input type="password" required minLength={6} value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} />
+            </label>
+            {authError && <p className="auth-error">{authError}</p>}
+            <button className="primary-button">{authMode === "login" ? "Ingresar" : "Registrarme"}</button>
+          </form>
+          <button className="text-button" onClick={() => { setAuthMode(authMode === "login" ? "signup" : "login"); setAuthError(""); }}>
+            {authMode === "login" ? "Todavía no tengo una cuenta" : "Ya tengo una cuenta"}
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <div className="dashboard-shell">
@@ -292,13 +499,13 @@ export default function Home() {
         <p className="nav-label">ESPACIO PERSONAL</p>
         <nav className="main-nav" aria-label="Navegación principal">
           <a className="active" href="#resumen">
-            <b>?</b> Resumen
+            <b>⌂</b> Resumen
           </a>
           <a href="#sobres">
-            <b>?</b> Sobres virtuales
+            <b>▣</b> Sobres virtuales
           </a>
           <a href="#inversiones">
-            <b>?</b> Inversiones
+            <b>◈</b> Inversiones
           </a>
           <a href="#actividad">
             <b>=</b> Historial
@@ -316,9 +523,15 @@ export default function Home() {
             aria-label="Cambiar tema"
             onClick={() => setDark(!isDark)}
           >
-            {isDark ? "?" : "?"}
+            {isDark ? "☀" : "☾"}
+          </button>
+          <button className="text-button" onClick={() => void supabase.auth.signOut()}>
+            Cerrar sesión
           </button>
         </header>
+        <div className={`sync-status ${syncStatus}`} role="status">
+          {authError || (syncStatus === "synced" ? "Sincronizado con la nube" : "Guardado localmente")}
+        </div>
         <section className="welcome-row" id="resumen">
           <div>
             <h2>Tu patrimonio, en perspectiva.</h2>
@@ -374,14 +587,14 @@ export default function Home() {
                 <p>Saldos acumulados por objetivo</p>
               </div>
               <button className="text-button" onClick={openNew}>
-                Nuevo sobre ?
+                Nuevo sobre
               </button>
             </div>
             {envelopeTotals.length ? (
               <div className="envelope-list">
                 {envelopeTotals.map((item) => (
                   <div className="envelope-item" key={item.name}>
-                    <span className="envelope-icon">?</span>
+                    <span className="envelope-icon">▣</span>
                     <div className="envelope-details">
                       <strong>{item.name}</strong>
                       <div className="envelope-balance-line">
@@ -403,7 +616,7 @@ export default function Home() {
                         aria-label={`Renombrar ${item.name}`}
                         onClick={() => renameEnvelope(item.name)}
                       >
-                        ?
+                        ✎
                       </button>
                       <button
                         type="button"
@@ -434,7 +647,7 @@ export default function Home() {
                 className="text-button"
                 onClick={() => setHistoryOpen(!historyOpen)}
               >
-                {historyOpen ? "Ocultar historial" : "Ver historial ?"}
+                {historyOpen ? "Ocultar historial" : "Ver historial"}
               </button>
             </div>
             {entries.length ? (
@@ -466,7 +679,7 @@ export default function Home() {
                         onClick={() => openEdit(entry)}
                         aria-label="Editar carga"
                       >
-                        ?
+                        ✎
                       </button>
                       <button
                         className="delete-button"
@@ -521,7 +734,7 @@ export default function Home() {
             return (
               <div className="investment-row" key={name}>
                 <div className="investment-name">
-                  <span className="investment-icon">?</span>
+                  <span className="investment-icon">◈</span>
                   <div>
                     <strong>{name}</strong>
                     <small>
@@ -532,6 +745,10 @@ export default function Home() {
                 <div>
                   <small>Capital</small>
                   <strong>{money(capital)}</strong>
+                </div>
+                <div>
+                  <small>Valor actual</small>
+                  <strong>{money(current)}</strong>
                 </div>
                 <div>
                   <small>Rendimiento</small>
