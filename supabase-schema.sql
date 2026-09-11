@@ -5,6 +5,7 @@ create table public.financial_entries (
   investment text not null default '',
   account text not null default '',
   currency text not null check (currency in ('ARS', 'USD', 'USDT')),
+  exchange_rate numeric not null default 1,
   amount numeric not null default 0,
   current_value numeric not null default 0,
   entry_date date not null,
@@ -36,3 +37,6 @@ create policy "Users manage their own financial lists"
   on public.financial_lists for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+alter table public.financial_entries
+  add column if not exists exchange_rate numeric not null default 1;

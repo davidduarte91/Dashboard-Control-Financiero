@@ -15,6 +15,7 @@ type Entry = {
   currentValue: number;
   date: string;
   createdAt?: string;
+  exchangeRate?: number;
   kind?: "aporte" | "retiro" | "valuacion";
 };
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
@@ -26,6 +27,8 @@ const descriptions: Record<string, string> = {
 };
 const money = (value: number, currency: Currency = "ARS") =>
   new Intl.NumberFormat("es-AR", { style: "currency", currency }).format(value);
+const toARS = (value: number, entry: Entry) =>
+  entry.currency === "ARS" ? value : value * (entry.exchangeRate || 1);
 const parseAmount = (value: string) =>
   Number(value.replace(/\./g, "").replace(",", "."));
 const formatMoneyInput = (value: string) => {
@@ -81,7 +84,7 @@ export default function Home() {
         const [entryResult, listResult] = await Promise.all([
           supabase
             .from("financial_entries")
-            .select("id, envelope, investment, account, currency, amount, current_value, entry_date, kind, created_at")
+            .select("id, envelope, investment, account, currency, amount, current_value, exchange_rate, entry_date, kind, created_at")
             .eq("user_id", sessionUser.id)
             .order("created_at", { ascending: false }),
           supabase.from("financial_lists").select("envelopes, investments, accounts").eq("user_id", sessionUser.id).maybeSingle(),
@@ -107,6 +110,7 @@ export default function Home() {
               (row.kind === "aporte" ? Number(row.amount) : 0),
             date: row.entry_date,
             createdAt: row.created_at,
+            exchangeRate: Number(row.exchange_rate) || 1,
             kind: row.kind as Entry["kind"],
           }));
           const localEntries = readLocal("finanzas-entries") || [];
@@ -135,6 +139,7 @@ export default function Home() {
                 currency: entry.currency,
                 amount: entry.amount,
                 current_value: entry.currentValue,
+                exchange_rate: entry.exchangeRate || 1,
                 entry_date: entry.date,
                 created_at: entry.createdAt || new Date().toISOString(),
                 kind: entry.kind || "aporte",
@@ -202,6 +207,7 @@ export default function Home() {
           currency: entry.currency,
           amount: entry.amount,
           current_value: entry.currentValue,
+          exchange_rate: entry.exchangeRate || 1,
           entry_date: entry.date,
           created_at: entry.createdAt || new Date().toISOString(),
           kind: entry.kind || "aporte",
@@ -267,15 +273,15 @@ export default function Home() {
     );
     const withdrawals = entries.filter((entry) => entry.kind === "retiro");
     const capital =
-      contributions.reduce((sum, entry) => sum + entry.amount, 0) -
-      withdrawals.reduce((sum, entry) => sum + entry.amount, 0);
+      contributions.reduce((sum, entry) => sum + toARS(entry.amount, entry), 0) -
+      withdrawals.reduce((sum, entry) => sum + toARS(entry.amount, entry), 0);
     const available =
       contributions
         .filter((entry) => !entry.investment)
-        .reduce((sum, entry) => sum + entry.currentValue, 0) -
+        .reduce((sum, entry) => sum + toARS(entry.currentValue, entry), 0) -
       withdrawals
         .filter((entry) => !entry.investment)
-        .reduce((sum, entry) => sum + entry.currentValue, 0);
+        .reduce((sum, entry) => sum + toARS(entry.currentValue, entry), 0);
     const invested = investments.reduce((sum, name) => {
       const vals = entries
         .filter(
@@ -295,19 +301,19 @@ export default function Home() {
         (entry) => entry.investment === name,
       );
       const current = latestValuation
-        ? latestValuation.currentValue +
+        ? toARS(latestValuation.currentValue, latestValuation) +
           investmentContributions
             .filter(afterValuation)
-            .reduce((total, entry) => total + entry.currentValue, 0) -
+            .reduce((total, entry) => total + toARS(entry.currentValue, entry), 0) -
           investmentWithdrawals
             .filter(afterValuation)
-            .reduce((total, entry) => total + entry.currentValue, 0)
+            .reduce((total, entry) => total + toARS(entry.currentValue, entry), 0)
         : investmentContributions.reduce(
-            (total, entry) => total + entry.currentValue,
+            (total, entry) => total + toARS(entry.currentValue, entry),
             0,
           ) -
           investmentWithdrawals.reduce(
-            (total, entry) => total + entry.currentValue,
+            (total, entry) => total + toARS(entry.currentValue, entry),
             0,
           );
       return sum + current;
@@ -319,10 +325,10 @@ export default function Home() {
     const items = entries.filter((entry) => entry.envelope === name);
     const contributions = items
       .filter((entry) => (entry.kind || "aporte") === "aporte")
-      .reduce((sum, entry) => sum + entry.currentValue, 0);
+      .reduce((sum, entry) => sum + toARS(entry.currentValue, entry), 0);
     const withdrawals = items
       .filter((entry) => entry.kind === "retiro")
-      .reduce((sum, entry) => sum + entry.currentValue, 0);
+      .reduce((sum, entry) => sum + toARS(entry.currentValue, entry), 0);
     return { name, total: contributions - withdrawals };
   });
   const openNew = () => {
@@ -401,6 +407,7 @@ export default function Home() {
             : amount,
       date: String(form.get("date")),
       createdAt: editing?.createdAt || new Date().toISOString(),
+      exchangeRate: parseAmount(String(form.get("exchangeRate") || "1")) || 1,
       kind: editing ? editing.kind || "aporte" : movementKind,
     };
     const next = editing
@@ -434,6 +441,7 @@ export default function Home() {
       currentValue: parseAmount(String(form.get("currentValue"))),
       date: String(form.get("date")),
       createdAt: new Date().toISOString(),
+      exchangeRate: parseAmount(String(form.get("exchangeRate") || "1")) || 1,
       kind: "valuacion",
     };
     const next = [entry, ...entries];
@@ -750,6 +758,7 @@ export default function Home() {
                 (b.createdAt || b.date).localeCompare(a.createdAt || a.date),
               );
             const latestValuation = valuationItems[0];
+            const displayCurrency = latestValuation?.currency || items[0]?.currency || "ARS";
             const valuationTime = latestValuation?.createdAt;
             const entriesAfterValuation = (entry: Entry) =>
               !valuationTime || (entry.createdAt || entry.date) > valuationTime;
@@ -779,18 +788,18 @@ export default function Home() {
                 </div>
                 <div>
                   <small>Capital</small>
-                  <strong>{money(capital)}</strong>
+                  <strong>{money(capital, displayCurrency)}</strong>
                 </div>
                 <div>
                   <small>Valor actual</small>
-                  <strong>{money(current)}</strong>
+                  <strong>{money(current, displayCurrency)}</strong>
                 </div>
                 <div>
                   <small>Rendimiento</small>
                   <strong
                     className={current - capital >= 0 ? "positive" : "negative"}
                   >
-                    {money(current - capital)}
+                    {money(current - capital, displayCurrency)}
                   </strong>
                 </div>
                 <div className="investment-actions">
@@ -880,6 +889,19 @@ export default function Home() {
                       <option>USD</option>
                       <option>USDT</option>
                     </select>
+                  </label>
+                  <label>
+                    Tipo de cambio a ARS
+                    <input
+                      name="exchangeRate"
+                      required
+                      inputMode="decimal"
+                      defaultValue="1"
+                      placeholder="Ej. 1.450"
+                      onChange={(event) => {
+                        event.target.value = formatMoneyInput(event.target.value);
+                      }}
+                    />
                   </label>
                   <label>
                     Fecha
@@ -1022,6 +1044,19 @@ export default function Home() {
                       <option>USD</option>
                       <option>USDT</option>
                     </select>
+                  </label>
+                  <label>
+                    Tipo de cambio a ARS
+                    <input
+                      name="exchangeRate"
+                      required
+                      inputMode="decimal"
+                      defaultValue={editing?.exchangeRate ? formatMoneyInput(String(editing.exchangeRate)) : "1"}
+                      placeholder="Ej. 1.450"
+                      onChange={(event) => {
+                        event.target.value = formatMoneyInput(event.target.value);
+                      }}
+                    />
                   </label>
                   <label>
                     {movementKind === "retiro"
