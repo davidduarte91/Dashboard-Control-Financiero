@@ -14,6 +14,7 @@ type Entry = {
   amount: number;
   currentValue: number;
   date: string;
+  createdAt?: string;
   kind?: "aporte" | "retiro" | "valuacion";
 };
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
@@ -80,9 +81,9 @@ export default function Home() {
         const [entryResult, listResult] = await Promise.all([
           supabase
             .from("financial_entries")
-            .select("id, envelope, investment, account, currency, amount, current_value, entry_date, kind")
+            .select("id, envelope, investment, account, currency, amount, current_value, entry_date, kind, created_at")
             .eq("user_id", sessionUser.id)
-            .order("entry_date", { ascending: false }),
+            .order("created_at", { ascending: false }),
           supabase.from("financial_lists").select("envelopes, investments, accounts").eq("user_id", sessionUser.id).maybeSingle(),
         ]);
         if (entryResult.error || listResult.error) {
@@ -105,6 +106,7 @@ export default function Home() {
               Number(row.current_value) ||
               (row.kind === "aporte" ? Number(row.amount) : 0),
             date: row.entry_date,
+            createdAt: row.created_at,
             kind: row.kind as Entry["kind"],
           }));
           const localEntries = readLocal("finanzas-entries") || [];
@@ -134,6 +136,7 @@ export default function Home() {
                 amount: entry.amount,
                 current_value: entry.currentValue,
                 entry_date: entry.date,
+                created_at: entry.createdAt || new Date().toISOString(),
                 kind: entry.kind || "aporte",
               })),
             );
@@ -200,6 +203,7 @@ export default function Home() {
           amount: entry.amount,
           current_value: entry.currentValue,
           entry_date: entry.date,
+          created_at: entry.createdAt || new Date().toISOString(),
           kind: entry.kind || "aporte",
         })),
       );
@@ -277,19 +281,36 @@ export default function Home() {
         .filter(
           (entry) => entry.investment === name && entry.kind === "valuacion",
         )
-        .sort((a, b) => b.date.localeCompare(a.date));
-      const base =
-        vals[0]?.currentValue ??
-        contributions
-          .filter((entry) => entry.investment === name)
-          .reduce((total, entry) => total + entry.currentValue, 0);
-      return (
-        sum +
-        base -
-        withdrawals
-          .filter((entry) => entry.investment === name)
-          .reduce((total, entry) => total + entry.currentValue, 0)
+        .sort((a, b) =>
+          (b.createdAt || b.date).localeCompare(a.createdAt || a.date),
+        );
+      const latestValuation = vals[0];
+      const valuationTime = latestValuation?.createdAt;
+      const afterValuation = (entry: Entry) =>
+        !valuationTime || (entry.createdAt || entry.date) > valuationTime;
+      const investmentContributions = contributions.filter(
+        (entry) => entry.investment === name,
       );
+      const investmentWithdrawals = withdrawals.filter(
+        (entry) => entry.investment === name,
+      );
+      const current = latestValuation
+        ? latestValuation.currentValue +
+          investmentContributions
+            .filter(afterValuation)
+            .reduce((total, entry) => total + entry.currentValue, 0) -
+          investmentWithdrawals
+            .filter(afterValuation)
+            .reduce((total, entry) => total + entry.currentValue, 0)
+        : investmentContributions.reduce(
+            (total, entry) => total + entry.currentValue,
+            0,
+          ) -
+          investmentWithdrawals.reduce(
+            (total, entry) => total + entry.currentValue,
+            0,
+          );
+      return sum + current;
     }, 0);
     return { capital, available, current: available + invested };
   }, [entries, investments]);
@@ -379,6 +400,7 @@ export default function Home() {
             ? parseAmount(currentText)
             : amount,
       date: String(form.get("date")),
+      createdAt: editing?.createdAt || new Date().toISOString(),
       kind: editing ? editing.kind || "aporte" : movementKind,
     };
     const next = editing
@@ -411,6 +433,7 @@ export default function Home() {
       amount: 0,
       currentValue: parseAmount(String(form.get("currentValue"))),
       date: String(form.get("date")),
+      createdAt: new Date().toISOString(),
       kind: "valuacion",
     };
     const next = [entry, ...entries];
@@ -723,14 +746,26 @@ export default function Home() {
                 (entry) =>
                   entry.investment === name && entry.kind === "valuacion",
               )
-              .sort((a, b) => b.date.localeCompare(a.date));
-            const current =
-              (valuationItems[0]?.currentValue ??
-                items.reduce((sum, entry) => sum + entry.currentValue, 0)) -
-              withdrawalItems.reduce(
-                (sum, entry) => sum + entry.currentValue,
-                0,
+              .sort((a, b) =>
+                (b.createdAt || b.date).localeCompare(a.createdAt || a.date),
               );
+            const latestValuation = valuationItems[0];
+            const valuationTime = latestValuation?.createdAt;
+            const entriesAfterValuation = (entry: Entry) =>
+              !valuationTime || (entry.createdAt || entry.date) > valuationTime;
+            const current = latestValuation
+              ? latestValuation.currentValue +
+                items
+                  .filter(entriesAfterValuation)
+                  .reduce((sum, entry) => sum + entry.currentValue, 0) -
+                withdrawalItems
+                  .filter(entriesAfterValuation)
+                  .reduce((sum, entry) => sum + entry.currentValue, 0)
+              : items.reduce((sum, entry) => sum + entry.currentValue, 0) -
+                withdrawalItems.reduce(
+                  (sum, entry) => sum + entry.currentValue,
+                  0,
+                );
             return (
               <div className="investment-row" key={name}>
                 <div className="investment-name">
