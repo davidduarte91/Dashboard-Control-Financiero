@@ -74,7 +74,7 @@ where migration_class <> 'automatic_candidate'
 order by user_id, entry_date, created_at, legacy_entry_id;
 
 -- Detect ambiguous same-date ordering. v1 has a date but no event time;
--- import must use a deterministic generated timestamp only after user approval.
+-- import must use a deterministic generated timestamp and event_sequence only after user approval.
 select user_id, envelope, investment, account, currency, entry_date, count(*) as entries_on_same_day
 from public.financial_entries
 group by user_id, envelope, investment, account, currency, entry_date
@@ -119,5 +119,6 @@ order by user_id, list_type, normalized_name;
 -- 2. Review every non-automatic result and every same-day ordering group.
 -- 3. Create dictionaries and positions only from approved normalized dimensions.
 -- 4. Insert events with legacy_entry_id using ON CONFLICT (user_id, legacy_entry_id) DO NOTHING.
--- 5. Recompute each position chronologically: movement before valuation at equal timestamps.
+-- 5. Assign a unique, increasing event_sequence per position and recompute chronologically:
+--    movement before valuation at equal timestamps, then event_sequence within one type.
 -- 6. Reconcile v1 event counts/totals and approved v2 snapshots; retain v1 until sign-off.
