@@ -117,6 +117,46 @@ create table public.financial_position_valuations (
   constraint financial_position_valuations_legacy_entry_unique unique (user_id, legacy_entry_id)
 );
 
+-- Exceptional immutable corrections. Normal changes use reversals or valuation corrections.
+create table public.financial_position_adjustments (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete restrict,
+  position_id uuid not null,
+  adjustment_type text not null,
+  amount numeric(20, 2) not null,
+  occurred_at timestamptz not null,
+  event_sequence bigint not null,
+  reason text not null,
+  created_by uuid not null default auth.uid() references auth.users(id) on delete restrict,
+  created_at timestamptz not null default now(),
+  constraint financial_position_adjustments_position_owner_fk
+    foreign key (position_id, user_id) references public.financial_positions (id, user_id) on delete restrict,
+  constraint financial_position_adjustments_id_user_unique unique (id, user_id),
+  constraint financial_position_adjustments_type_valid check (adjustment_type in ('capital_basis', 'value')),
+  constraint financial_position_adjustments_amount_nonzero check (amount <> 0),
+  constraint financial_position_adjustments_sequence_positive check (event_sequence > 0),
+  constraint financial_position_adjustments_reason_normalized check (reason = btrim(reason) and reason <> '')
+);
+
+-- Every adjustment must cite one or more immutable source events; the RPC verifies
+-- that each cited event belongs to the same position and user.
+create table public.financial_position_adjustment_references (
+  id uuid primary key default gen_random_uuid(),
+  adjustment_id uuid not null,
+  user_id uuid not null,
+  movement_id uuid,
+  valuation_id uuid,
+  created_at timestamptz not null default now(),
+  constraint financial_position_adjustment_references_adjustment_owner_fk
+    foreign key (adjustment_id, user_id) references public.financial_position_adjustments (id, user_id) on delete restrict,
+  constraint financial_position_adjustment_references_movement_owner_fk
+    foreign key (movement_id, user_id) references public.financial_position_movements (id, user_id) on delete restrict,
+  constraint financial_position_adjustment_references_valuation_owner_fk
+    foreign key (valuation_id, user_id) references public.financial_position_valuations (id, user_id) on delete restrict,
+  constraint financial_position_adjustment_references_one_source
+    check ((movement_id is not null)::integer + (valuation_id is not null)::integer = 1)
+);
+
 -- Rebuildable cache. The immutable event ledger remains the source of truth.
 create table public.financial_position_snapshots (
   position_id uuid primary key,
@@ -127,6 +167,8 @@ create table public.financial_position_snapshots (
   historical_withdrawals numeric(20, 2) not null check (historical_withdrawals >= 0),
   capital_withdrawn numeric(20, 2) not null check (capital_withdrawn >= 0),
   remaining_capital numeric(20, 2) not null check (remaining_capital >= 0),
+  capital_adjustments numeric(20, 2) not null default 0,
+  value_adjustments numeric(20, 2) not null default 0,
   realized_gain numeric(20, 2) not null,
   realized_loss numeric(20, 2) not null check (realized_loss <= 0),
   realized_performance numeric(20, 2) not null,
@@ -158,7 +200,7 @@ create table public.financial_position_write_requests (
   constraint financial_position_write_requests_position_owner_fk
     foreign key (position_id, user_id) references public.financial_positions (id, user_id) on delete restrict,
   constraint financial_position_write_requests_operation_valid
-    check (operation in ('contribution', 'withdrawal', 'valuation', 'reverse_movement', 'correct_valuation')),
+    check (operation in ('contribution', 'withdrawal', 'valuation', 'reverse_movement', 'correct_valuation', 'adjustment')),
   constraint financial_position_write_requests_fingerprint_not_blank check (btrim(request_fingerprint) <> '')
 );
 
@@ -169,8 +211,13 @@ create unique index financial_accounts_active_name_unique_idx on public.financia
 create index financial_positions_active_by_user_idx on public.financial_positions (user_id, archived_at) where archived_at is null;
 create index financial_position_movements_replay_idx on public.financial_position_movements (user_id, position_id, occurred_at, event_sequence);
 create index financial_position_valuations_replay_idx on public.financial_position_valuations (user_id, position_id, valued_at, event_sequence);
+create index financial_position_adjustments_replay_idx on public.financial_position_adjustments (user_id, position_id, occurred_at, event_sequence);
 create unique index financial_position_movements_one_reversal_idx on public.financial_position_movements (reversal_of_movement_id) where reversal_of_movement_id is not null;
 create unique index financial_position_valuations_one_reversal_idx on public.financial_position_valuations (reversal_of_valuation_id) where reversal_of_valuation_id is not null;
+create index financial_position_adjustment_references_movement_idx on public.financial_position_adjustment_references (user_id, movement_id) where movement_id is not null;
+create index financial_position_adjustment_references_valuation_idx on public.financial_position_adjustment_references (user_id, valuation_id) where valuation_id is not null;
+create unique index financial_position_adjustment_references_movement_unique_idx on public.financial_position_adjustment_references (adjustment_id, movement_id) where movement_id is not null;
+create unique index financial_position_adjustment_references_valuation_unique_idx on public.financial_position_adjustment_references (adjustment_id, valuation_id) where valuation_id is not null;
 create index financial_position_snapshots_user_idx on public.financial_position_snapshots (user_id, computed_at desc);
 create index financial_position_write_requests_position_idx on public.financial_position_write_requests (user_id, position_id, created_at desc);
 
@@ -201,6 +248,8 @@ alter table public.financial_accounts enable row level security;
 alter table public.financial_positions enable row level security;
 alter table public.financial_position_movements enable row level security;
 alter table public.financial_position_valuations enable row level security;
+alter table public.financial_position_adjustments enable row level security;
+alter table public.financial_position_adjustment_references enable row level security;
 alter table public.financial_position_snapshots enable row level security;
 alter table public.financial_position_write_requests enable row level security;
 
@@ -210,6 +259,8 @@ grant select, insert, update on table public.financial_accounts to authenticated
 grant select, insert, update on table public.financial_positions to authenticated;
 grant select on table public.financial_position_movements to authenticated;
 grant select on table public.financial_position_valuations to authenticated;
+grant select on table public.financial_position_adjustments to authenticated;
+grant select on table public.financial_position_adjustment_references to authenticated;
 grant select on table public.financial_position_snapshots to authenticated;
 
 revoke delete on table public.financial_envelopes from anon, authenticated;
@@ -220,6 +271,8 @@ revoke delete on table public.financial_position_movements from anon, authentica
 revoke delete on table public.financial_position_valuations from anon, authenticated;
 revoke insert, update, delete on table public.financial_position_movements from anon, authenticated;
 revoke insert, update, delete on table public.financial_position_valuations from anon, authenticated;
+revoke insert, update, delete on table public.financial_position_adjustments from anon, authenticated;
+revoke insert, update, delete on table public.financial_position_adjustment_references from anon, authenticated;
 revoke insert, update, delete on table public.financial_position_snapshots from anon, authenticated;
 revoke all on table public.financial_position_write_requests from anon, authenticated;
 
@@ -238,6 +291,8 @@ create policy "financial_positions_insert_owner" on public.financial_positions f
 create policy "financial_positions_update_owner" on public.financial_positions for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "financial_position_movements_select_owner" on public.financial_position_movements for select to authenticated using (user_id = auth.uid());
 create policy "financial_position_valuations_select_owner" on public.financial_position_valuations for select to authenticated using (user_id = auth.uid());
+create policy "financial_position_adjustments_select_owner" on public.financial_position_adjustments for select to authenticated using (user_id = auth.uid());
+create policy "financial_position_adjustment_references_select_owner" on public.financial_position_adjustment_references for select to authenticated using (user_id = auth.uid());
 create policy "financial_position_snapshots_select_owner" on public.financial_position_snapshots for select to authenticated using (user_id = auth.uid());
 
 commit;

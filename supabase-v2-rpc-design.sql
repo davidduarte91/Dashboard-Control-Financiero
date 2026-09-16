@@ -83,28 +83,46 @@ begin
   if not found then
     insert into public.financial_position_snapshots (
       position_id, user_id, current_value, historical_contributions, historical_withdrawals,
-      capital_withdrawn, remaining_capital, realized_gain, realized_loss,
+      capital_withdrawn, remaining_capital, capital_adjustments, value_adjustments, realized_gain, realized_loss,
       realized_performance, unrealized_performance, historical_performance
-    ) select id, user_id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ) select id, user_id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
       from public.financial_positions where id = p_position_id
       returning * into s;
   end if;
   s.current_value := 0; s.historical_contributions := 0; s.historical_withdrawals := 0;
-  s.capital_withdrawn := 0; s.remaining_capital := 0; s.realized_gain := 0; s.realized_loss := 0;
+  s.capital_withdrawn := 0; s.remaining_capital := 0; s.capital_adjustments := 0; s.value_adjustments := 0;
+  s.realized_gain := 0; s.realized_loss := 0;
   s.last_valuation_at := null;
 
   for e in
-    select event_type, event_at, event_sequence, id, kind, amount, valuation_value
+    select event_type, event_at, event_sequence, id, kind, amount, valuation_value, adjustment_type
     from (
-      select 1 as event_type, occurred_at as event_at, event_sequence, id, kind, amount, null::numeric as valuation_value
+      select 1 as event_type, occurred_at as event_at, event_sequence, id, kind, amount, null::numeric as valuation_value, null::text as adjustment_type
       from public.financial_position_movements where position_id = p_position_id
       union all
-      select 2, valued_at, event_sequence, id, null::text, null::numeric, value
+      select 2, valued_at, event_sequence, id, null::text, null::numeric, value, null::text
       from public.financial_position_valuations where position_id = p_position_id
+      union all
+      select 3, occurred_at, event_sequence, id, null::text, amount, null::numeric, adjustment_type
+      from public.financial_position_adjustments where position_id = p_position_id
     ) events
     order by event_at, event_type, event_sequence
   loop
-    if e.event_type = 2 then
+    if e.event_type = 3 then
+      if e.adjustment_type = 'capital_basis' then
+        if s.remaining_capital + e.amount < 0 then
+          raise exception using errcode = 'P0001', message = 'ADJUSTMENT_MAKES_CAPITAL_NEGATIVE', detail = e.id::text;
+        end if;
+        s.remaining_capital := round(s.remaining_capital + e.amount, 2);
+        s.capital_adjustments := round(s.capital_adjustments + e.amount, 2);
+      else
+        if s.current_value + e.amount < 0 then
+          raise exception using errcode = 'P0001', message = 'ADJUSTMENT_MAKES_VALUE_NEGATIVE', detail = e.id::text;
+        end if;
+        s.current_value := round(s.current_value + e.amount, 2);
+        s.value_adjustments := round(s.value_adjustments + e.amount, 2);
+      end if;
+    elsif e.event_type = 2 then
       s.current_value := round(e.valuation_value, 2);
       s.last_valuation_at := e.event_at;
     elsif e.kind = 'contribution' then
@@ -139,6 +157,7 @@ begin
     revision = s.revision, current_value = s.current_value,
     historical_contributions = s.historical_contributions, historical_withdrawals = s.historical_withdrawals,
     capital_withdrawn = s.capital_withdrawn, remaining_capital = s.remaining_capital,
+    capital_adjustments = s.capital_adjustments, value_adjustments = s.value_adjustments,
     realized_gain = s.realized_gain, realized_loss = s.realized_loss,
     realized_performance = s.realized_performance, unrealized_performance = s.unrealized_performance,
     historical_performance = s.historical_performance, last_valuation_at = s.last_valuation_at,
@@ -162,6 +181,7 @@ begin
   select coalesce(max(event_sequence), 0) + 1 into v_sequence from (
     select event_sequence from public.financial_position_movements where position_id = p_position_id
     union all select event_sequence from public.financial_position_valuations where position_id = p_position_id
+    union all select event_sequence from public.financial_position_adjustments where position_id = p_position_id
   ) event_sequences;
   insert into public.financial_position_movements (user_id, position_id, kind, amount, occurred_at, event_sequence)
   values (v_position.user_id, p_position_id, 'contribution', p_amount, p_occurred_at, v_sequence) returning * into v_movement;
@@ -190,6 +210,7 @@ begin
   select coalesce(max(event_sequence), 0) + 1 into v_sequence from (
     select event_sequence from public.financial_position_movements where position_id = p_position_id
     union all select event_sequence from public.financial_position_valuations where position_id = p_position_id
+    union all select event_sequence from public.financial_position_adjustments where position_id = p_position_id
   ) event_sequences;
   insert into public.financial_position_movements (user_id, position_id, kind, amount, occurred_at, event_sequence)
   values (v_position.user_id, p_position_id, 'withdrawal', p_amount, p_occurred_at, v_sequence) returning * into v_movement;
@@ -214,6 +235,7 @@ begin
   select coalesce(max(event_sequence), 0) + 1 into v_sequence from (
     select event_sequence from public.financial_position_movements where position_id = p_position_id
     union all select event_sequence from public.financial_position_valuations where position_id = p_position_id
+    union all select event_sequence from public.financial_position_adjustments where position_id = p_position_id
   ) event_sequences;
   insert into public.financial_position_valuations (user_id, position_id, value, valued_at, source, event_sequence)
   values (v_position.user_id, p_position_id, p_value, p_valued_at, p_source, v_sequence) returning * into v_valuation;
@@ -245,6 +267,7 @@ begin
   select coalesce(max(event_sequence), 0) + 1 into v_sequence from (
     select event_sequence from public.financial_position_movements where position_id = p_position_id
     union all select event_sequence from public.financial_position_valuations where position_id = p_position_id
+    union all select event_sequence from public.financial_position_adjustments where position_id = p_position_id
   ) event_sequences;
   insert into public.financial_position_movements (user_id, position_id, kind, amount, occurred_at, event_sequence, reversal_of_movement_id)
   values (v_position.user_id, p_position_id,
@@ -276,11 +299,65 @@ begin
   select coalesce(max(event_sequence), 0) + 1 into v_sequence from (
     select event_sequence from public.financial_position_movements where position_id = p_position_id
     union all select event_sequence from public.financial_position_valuations where position_id = p_position_id
+    union all select event_sequence from public.financial_position_adjustments where position_id = p_position_id
   ) event_sequences;
   insert into public.financial_position_valuations (user_id, position_id, value, valued_at, source, event_sequence, reversal_of_valuation_id)
   values (v_position.user_id, p_position_id, p_replacement_value, p_valued_at, p_source, v_sequence, v_original.id) returning * into v_correction;
   v_snapshot := public.financial_v2_rebuild_snapshot(p_position_id);
   v_result := jsonb_build_object('valuation', to_jsonb(v_correction), 'snapshot', to_jsonb(v_snapshot));
+  perform public.financial_v2_complete_write_request(p_request_id, v_result);
+  return v_result;
+end;
+$$;
+
+-- Exceptional correction, not a substitute for edits or ordinary reversals.
+-- capital_basis changes remaining capital only; value changes current value only.
+-- Direct realized-performance adjustments are intentionally unsupported because they
+-- would manufacture return without a corresponding financial event.
+create or replace function public.financial_v2_record_adjustment(
+  p_position_id uuid, p_adjustment_type text, p_amount numeric(20,2), p_occurred_at timestamptz,
+  p_reason text, p_related_movement_ids uuid[], p_related_valuation_ids uuid[], p_request_id uuid
+) returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_position public.financial_positions; v_adjustment public.financial_position_adjustments;
+  v_snapshot public.financial_position_snapshots; v_sequence bigint; v_existing jsonb; v_result jsonb;
+  v_movement_count integer; v_valuation_count integer;
+begin
+  if p_adjustment_type not in ('capital_basis', 'value') or p_amount = 0 or p_occurred_at is null
+    or p_reason is null or p_reason <> btrim(p_reason) or p_reason = '' then
+    raise exception using errcode = '22023', message = 'INVALID_ADJUSTMENT_INPUT';
+  end if;
+  if coalesce(cardinality(p_related_movement_ids), 0) + coalesce(cardinality(p_related_valuation_ids), 0) = 0
+    or array_position(p_related_movement_ids, null) is not null or array_position(p_related_valuation_ids, null) is not null then
+    raise exception using errcode = '22023', message = 'ADJUSTMENT_REFERENCE_REQUIRED';
+  end if;
+  v_position := public.financial_v2_lock_owned_position(p_position_id);
+  v_existing := public.financial_v2_begin_write_request(p_position_id, p_request_id, 'adjustment',
+    jsonb_build_object('type', p_adjustment_type, 'amount', p_amount, 'occurred_at', p_occurred_at,
+      'reason', p_reason, 'movement_ids', p_related_movement_ids, 'valuation_ids', p_related_valuation_ids));
+  if v_existing is not null then return v_existing; end if;
+  select count(*) into v_movement_count from public.financial_position_movements
+    where id = any(p_related_movement_ids) and position_id = p_position_id and user_id = v_position.user_id;
+  select count(*) into v_valuation_count from public.financial_position_valuations
+    where id = any(p_related_valuation_ids) and position_id = p_position_id and user_id = v_position.user_id;
+  if v_movement_count <> coalesce(cardinality(p_related_movement_ids), 0)
+    or v_valuation_count <> coalesce(cardinality(p_related_valuation_ids), 0) then
+    raise exception using errcode = 'P0001', message = 'ADJUSTMENT_REFERENCE_NOT_FOUND_OR_FORBIDDEN';
+  end if;
+  select coalesce(max(event_sequence), 0) + 1 into v_sequence from (
+    select event_sequence from public.financial_position_movements where position_id = p_position_id
+    union all select event_sequence from public.financial_position_valuations where position_id = p_position_id
+    union all select event_sequence from public.financial_position_adjustments where position_id = p_position_id
+  ) event_sequences;
+  insert into public.financial_position_adjustments
+    (user_id, position_id, adjustment_type, amount, occurred_at, event_sequence, reason, created_by)
+  values (v_position.user_id, p_position_id, p_adjustment_type, p_amount, p_occurred_at, v_sequence, p_reason, auth.uid())
+  returning * into v_adjustment;
+  insert into public.financial_position_adjustment_references (adjustment_id, user_id, movement_id)
+    select v_adjustment.id, v_position.user_id, unnest(p_related_movement_ids);
+  insert into public.financial_position_adjustment_references (adjustment_id, user_id, valuation_id)
+    select v_adjustment.id, v_position.user_id, unnest(p_related_valuation_ids);
+  v_snapshot := public.financial_v2_rebuild_snapshot(p_position_id);
+  v_result := jsonb_build_object('adjustment', to_jsonb(v_adjustment), 'snapshot', to_jsonb(v_snapshot));
   perform public.financial_v2_complete_write_request(p_request_id, v_result);
   return v_result;
 end;
@@ -303,7 +380,7 @@ begin
 end;
 $$;
 
--- Explicitly expose only the five public writers. The lock and rebuild helpers stay internal.
+-- Explicitly expose only the six public writers. The lock and rebuild helpers stay internal.
 revoke all on function public.financial_v2_lock_owned_position(uuid) from public;
 revoke all on function public.financial_v2_begin_write_request(uuid, uuid, text, jsonb) from public;
 revoke all on function public.financial_v2_complete_write_request(uuid, jsonb) from public;
@@ -314,11 +391,13 @@ revoke all on function public.financial_v2_record_withdrawal(uuid, numeric, time
 revoke all on function public.financial_v2_record_valuation(uuid, numeric, timestamptz, text, uuid) from public;
 revoke all on function public.financial_v2_reverse_movement(uuid, uuid, timestamptz, uuid) from public;
 revoke all on function public.financial_v2_correct_valuation(uuid, uuid, numeric, timestamptz, text, uuid) from public;
+revoke all on function public.financial_v2_record_adjustment(uuid, text, numeric, timestamptz, text, uuid[], uuid[], uuid) from public;
 grant execute on function public.financial_v2_record_contribution(uuid, numeric, timestamptz, uuid) to authenticated;
 grant execute on function public.financial_v2_record_withdrawal(uuid, numeric, timestamptz, uuid) to authenticated;
 grant execute on function public.financial_v2_record_valuation(uuid, numeric, timestamptz, text, uuid) to authenticated;
 grant execute on function public.financial_v2_reverse_movement(uuid, uuid, timestamptz, uuid) to authenticated;
 grant execute on function public.financial_v2_correct_valuation(uuid, uuid, numeric, timestamptz, text, uuid) to authenticated;
+grant execute on function public.financial_v2_record_adjustment(uuid, text, numeric, timestamptz, text, uuid[], uuid[], uuid) to authenticated;
 
 commit;
 
