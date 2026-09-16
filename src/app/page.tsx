@@ -1,23 +1,23 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
-
-type Currency = "ARS" | "USD" | "USDT";
-type Entry = {
-  id: string;
-  envelope: string;
-  investment: string;
-  account: string;
-  currency: Currency;
-  amount: number;
-  currentValue: number;
-  date: string;
-  createdAt?: string;
-  exchangeRate?: number;
-  kind?: "aporte" | "retiro" | "valuacion";
-};
+import {
+  changeFinancialEnvelope,
+  deleteFinancialEntry,
+  saveFinancialEntry,
+  saveFinancialLists,
+  type Currency,
+  type Entry,
+  type FinancialLists,
+} from "@/lib/financial-sync";
+import {
+  readFinancialCache,
+  writeFinancialCache,
+  type FinancialSession,
+  type FinancialSnapshot,
+} from "@/lib/financial-cache";
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
 const descriptions: Record<string, string> = {
   FCI: "Fondos comunes de inversión",
@@ -25,8 +25,15 @@ const descriptions: Record<string, string> = {
   "Acciones argentinas": "Acciones locales agrupadas",
   Criptomonedas: "Lemon, Nexo y otros exchanges",
 };
+const formatMoneyValue = (value: number) =>
+  new Intl.NumberFormat("es-AR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 const money = (value: number, currency: Currency = "ARS") =>
-  new Intl.NumberFormat("es-AR", { style: "currency", currency }).format(value);
+  currency === "USDT"
+    ? `${formatMoneyValue(value)} USDT`
+    : new Intl.NumberFormat("es-AR", { style: "currency", currency }).format(value);
 const toARS = (value: number, entry: Entry) =>
   entry.currency === "ARS" ? value : value * (entry.exchangeRate || 1);
 const parseAmount = (value: string) =>
@@ -71,34 +78,43 @@ export default function Home() {
     [authPassword, setAuthPassword] = useState(""),
     [authError, setAuthError] = useState(""),
     [syncStatus, setSyncStatus] = useState<"local" | "synced" | "error">("local");
+  const [isSaving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const draftId = useRef<string | null>(null);
+  const sessionRef = useRef<FinancialSession>({ userId: null, ready: false });
+  const snapshotRef = useRef<FinancialSnapshot>({
+    entries: [], lists: { envelopes: [], investments: defaults, accounts: [] },
+  });
   useEffect(() => {
-    const readLocal = (key: string) => {
-      const value = localStorage.getItem(key);
-      return value ? JSON.parse(value) : null;
+    let disposed = false;
+    let initialized = false;
+    let receivedAuthEvent = false;
+    let loadTimer: ReturnType<typeof setTimeout> | undefined;
+    const isCurrent = (session: FinancialSession) => !disposed && sessionRef.current === session;
+    const showSnapshot = (snapshot: FinancialSnapshot) => {
+      snapshotRef.current = snapshot;
+      setEntries(snapshot.entries);
+      setEnvelopes(snapshot.lists.envelopes);
+      setInvestments(snapshot.lists.investments);
+      setAccounts(snapshot.lists.accounts);
     };
-    const load = async () => {
-      const { data } = await supabase.auth.getSession();
-      const sessionUser = data.session?.user ?? null;
-      setUser(sessionUser);
-      if (sessionUser) {
+    const load = async (session: FinancialSession) => {
+      if (!session.userId || !isCurrent(session)) return;
+      try {
         const [entryResult, listResult] = await Promise.all([
           supabase
             .from("financial_entries")
             .select("id, envelope, investment, account, currency, amount, current_value, exchange_rate, entry_date, kind, created_at")
-            .eq("user_id", sessionUser.id)
+            .eq("user_id", session.userId)
             .order("created_at", { ascending: false }),
-          supabase.from("financial_lists").select("envelopes, investments, accounts").eq("user_id", sessionUser.id).maybeSingle(),
+          supabase.from("financial_lists").select("envelopes, investments, accounts").eq("user_id", session.userId).maybeSingle(),
         ]);
+        if (!isCurrent(session)) return;
         if (entryResult.error || listResult.error) {
-          setEntries(readLocal("finanzas-entries") || []);
-          setEnvelopes(readLocal("finanzas-envelopes") || []);
-          setInvestments(readLocal("finanzas-investments") || defaults);
-          setAccounts(readLocal("finanzas-accounts") || []);
-          const error = entryResult.error || listResult.error;
-          setSyncStatus("error");
-          setAuthError(`No se pudo sincronizar con Supabase: ${error?.message || "error desconocido"}`);
-        } else {
-          const cloudEntries = (entryResult.data || []).map((row) => ({
+          throw new Error(entryResult.error?.message || listResult.error?.message);
+        }
+        const snapshot: FinancialSnapshot = {
+          entries: (entryResult.data || []).map((row) => ({
             id: row.id,
             envelope: row.envelope,
             investment: row.investment,
@@ -112,148 +128,140 @@ export default function Home() {
             createdAt: row.created_at,
             exchangeRate: Number(row.exchange_rate) || 1,
             kind: row.kind as Entry["kind"],
-          }));
-          const localEntries = readLocal("finanzas-entries") || [];
-          const localEnvelopes = readLocal("finanzas-envelopes") || [];
-          const localInvestments = readLocal("finanzas-investments") || defaults;
-          const localAccounts = readLocal("finanzas-accounts") || [];
-          const shouldMigrate = cloudEntries.length === 0 && localEntries.length > 0;
-          const loadedEntries = shouldMigrate ? localEntries : cloudEntries;
-          const loadedLists = listResult.data || {
-            envelopes: localEnvelopes,
-            investments: localInvestments,
-            accounts: localAccounts,
-          };
-          setEntries(loadedEntries);
-          setEnvelopes(loadedLists.envelopes);
-          setInvestments(loadedLists.investments);
-          setAccounts(loadedLists.accounts);
-          if (shouldMigrate) {
-            const { error: entriesError } = await supabase.from("financial_entries").upsert(
-              localEntries.map((entry: Entry) => ({
-                id: entry.id,
-                user_id: sessionUser.id,
-                envelope: entry.envelope,
-                investment: entry.investment,
-                account: entry.account,
-                currency: entry.currency,
-                amount: entry.amount,
-                current_value: entry.currentValue,
-                exchange_rate: entry.exchangeRate || 1,
-                entry_date: entry.date,
-                created_at: entry.createdAt || new Date().toISOString(),
-                kind: entry.kind || "aporte",
-              })),
-            );
-            const { error: listsError } = await supabase.from("financial_lists").upsert({
-              user_id: sessionUser.id,
-              envelopes: localEnvelopes,
-              investments: localInvestments,
-              accounts: localAccounts,
-            });
-            if (entriesError || listsError) {
-              const error = entriesError || listsError;
-              setSyncStatus("error");
-              setAuthError(`No se pudo migrar a Supabase: ${error?.message}`);
-            } else {
-              setSyncStatus("synced");
-            }
-          } else {
-            setSyncStatus("synced");
-          }
+          })),
+          lists: listResult.data || { envelopes: [], investments: defaults, accounts: [] },
+        };
+        showSnapshot(snapshot);
+        setSyncStatus("synced");
+        try {
+          writeFinancialCache(localStorage, session.userId, snapshot);
+        } catch {
+          setAuthError("Datos cargados desde la nube; no se pudo guardar una copia local en este navegador.");
         }
-      } else {
-        setEntries(readLocal("finanzas-entries") || []);
-        setEnvelopes(readLocal("finanzas-envelopes") || []);
-        setInvestments(readLocal("finanzas-investments") || defaults);
-        setAccounts(readLocal("finanzas-accounts") || []);
+      } catch {
+        if (!isCurrent(session)) return;
+        let cached: FinancialSnapshot | null = null;
+        try {
+          cached = readFinancialCache(localStorage, session.userId);
+        } catch {
+          // Some browsers deny access to the storage object itself.
+        }
+        if (cached) showSnapshot(cached);
+        setSyncStatus("error");
+        setAuthError(cached
+          ? "No se pudo actualizar desde la nube. Se muestra la última copia local de esta cuenta."
+          : "No se pudo cargar la información y no hay una copia local válida de esta cuenta. Recargá para reintentar.");
+      } finally {
+        if (isCurrent(session)) {
+          session.ready = true;
+          setAuthLoading(false);
+        }
       }
-      if (localStorage.getItem("finanzas-theme") === "dark") setDark(true);
-      setToday(new Date().toISOString().slice(0, 10));
-      setHydrated(true);
-      setAuthLoading(false);
     };
-    void load();
+    const switchUser = (nextUser: User | null) => {
+      if (disposed) return;
+      const userId = nextUser?.id ?? null;
+      if (initialized && sessionRef.current.userId === userId) {
+        setUser(nextUser);
+        return;
+      }
+      if (!initialized) {
+        try { setDark(localStorage.getItem("finanzas-theme") === "dark"); } catch { /* Optional preference. */ }
+        setToday(new Date().toISOString().slice(0, 10));
+        setHydrated(true);
+      }
+      initialized = true;
+      if (loadTimer !== undefined) clearTimeout(loadTimer);
+      const session: FinancialSession = { userId, ready: false };
+      sessionRef.current = session;
+      savingRef.current = false;
+      draftId.current = null;
+      showSnapshot({ entries: [], lists: { envelopes: [], investments: defaults, accounts: [] } });
+      setSaving(false);
+      setModalOpen(false);
+      setEditing(null);
+      setValuation("");
+      setHistoryOpen(false);
+      setAuthEmail("");
+      setAuthPassword("");
+      setAuthError("");
+      setSyncStatus("local");
+      setUser(nextUser);
+      setAuthLoading(Boolean(userId));
+      // Supabase work runs after the synchronous auth callback has returned.
+      if (userId) loadTimer = setTimeout(() => { void load(session); }, 0);
+    };
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
+      receivedAuthEvent = true;
+      switchUser(session?.user ?? null);
     });
-    return () => listener.subscription.unsubscribe();
+    void supabase.auth.getSession().then(({ data, error }) => {
+      if (disposed || receivedAuthEvent) return;
+      if (error) throw error;
+      switchUser(data.session?.user ?? null);
+    }).catch(() => {
+      if (disposed || receivedAuthEvent) return;
+      switchUser(null);
+      setAuthError("No se pudo recuperar la sesión. Volvé a iniciar sesión.");
+    });
+    return () => {
+      disposed = true;
+      if (loadTimer !== undefined) clearTimeout(loadTimer);
+      sessionRef.current = { userId: null, ready: false };
+      listener.subscription.unsubscribe();
+    };
   }, []);
   useEffect(() => {
     if (!hydrated) return;
     document.documentElement.dataset.theme = isDark ? "dark" : "light";
-    localStorage.setItem("finanzas-theme", isDark ? "dark" : "light");
+    try { localStorage.setItem("finanzas-theme", isDark ? "dark" : "light"); } catch { /* Optional preference. */ }
   }, [isDark, hydrated]);
-  const persistEntries = async (next: Entry[]) => {
-    setEntries(next);
-    localStorage.setItem("finanzas-entries", JSON.stringify(next));
-    if (user) {
-      const { data: remoteEntries, error: readError } = await supabase
-        .from("financial_entries")
-        .select("id")
-        .eq("user_id", user.id);
-      if (readError) {
-        setSyncStatus("error");
-        setAuthError(`No se pudo leer el historial: ${readError.message}`);
-        return;
-      }
-      const { error: upsertError } = await supabase.from("financial_entries").upsert(
-        next.map((entry) => ({
-          id: entry.id,
-          user_id: user.id,
-          envelope: entry.envelope,
-          investment: entry.investment,
-          account: entry.account,
-          currency: entry.currency,
-          amount: entry.amount,
-          current_value: entry.currentValue,
-          exchange_rate: entry.exchangeRate || 1,
-          entry_date: entry.date,
-          created_at: entry.createdAt || new Date().toISOString(),
-          kind: entry.kind || "aporte",
-        })),
-      );
-      if (upsertError) {
-        setSyncStatus("error");
-        setAuthError(`No se pudo guardar el historial: ${upsertError.message}`);
-        return;
-      }
-      setSyncStatus("synced");
-      const nextIds = new Set(next.map((entry) => entry.id));
-      const removedIds = (remoteEntries || [])
-        .map((entry) => entry.id)
-        .filter((id) => !nextIds.has(id));
-      if (!removedIds.length) return;
-      const { error: deleteError } = await supabase
-        .from("financial_entries")
-        .delete()
-        .eq("user_id", user.id)
-        .in("id", removedIds);
-      if (deleteError) {
-        setSyncStatus("error");
-        setAuthError(`No se pudieron quitar registros borrados: ${deleteError.message}`);
-      }
+  const assertSession = (session: FinancialSession) => {
+    if (sessionRef.current !== session || !session.userId) {
+      throw new Error("La sesión cambió. La operación anterior no puede continuar.");
     }
   };
-  const persistLists = async (nextEnvelopes: string[], nextInvestments: string[], nextAccounts: string[]) => {
-    setEnvelopes(nextEnvelopes);
-    setInvestments(nextInvestments);
-    setAccounts(nextAccounts);
-    localStorage.setItem("finanzas-envelopes", JSON.stringify(nextEnvelopes));
-    localStorage.setItem("finanzas-investments", JSON.stringify(nextInvestments));
-    localStorage.setItem("finanzas-accounts", JSON.stringify(nextAccounts));
-    if (user) {
-      const { error } = await supabase.from("financial_lists").upsert({
-        user_id: user.id,
-        envelopes: nextEnvelopes,
-        investments: nextInvestments,
-        accounts: nextAccounts,
-      });
-      if (error) {
-        setSyncStatus("error");
-        setAuthError(`No se pudieron guardar las listas: ${error.message}`);
-      } else {
-        setSyncStatus("synced");
+  const cacheEntries = (next: Entry[], session: FinancialSession) => {
+    assertSession(session);
+    snapshotRef.current = { ...snapshotRef.current, entries: next };
+    setEntries(next);
+    writeFinancialCache(localStorage, session.userId!, snapshotRef.current);
+  };
+  const cacheLists = (next: FinancialLists, session: FinancialSession) => {
+    assertSession(session);
+    snapshotRef.current = { ...snapshotRef.current, lists: next };
+    setEnvelopes(next.envelopes);
+    setInvestments(next.investments);
+    setAccounts(next.accounts);
+    writeFinancialCache(localStorage, session.userId!, snapshotRef.current);
+  };
+  const runMutation = async (operation: (userId: string, session: FinancialSession) => Promise<void>) => {
+    // A ref also blocks a second submission before React has re-rendered.
+    if (savingRef.current) return false;
+    const session = sessionRef.current;
+    if (!user || session.userId !== user.id || !session.ready) {
+      setSyncStatus("error");
+      setAuthError("Iniciá sesión antes de guardar cambios.");
+      return false;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    setAuthError("");
+    try {
+      await operation(user.id, session);
+      assertSession(session);
+      setSyncStatus("synced");
+      return true;
+    } catch (error) {
+      if (sessionRef.current !== session) return false;
+      setSyncStatus("error");
+      const detail = error instanceof Error ? error.message : "Error desconocido";
+      setAuthError(`No se pudo completar la operación: ${detail}`);
+      return false;
+    } finally {
+      if (sessionRef.current === session) {
+        savingRef.current = false;
+        setSaving(false);
       }
     }
   };
@@ -332,6 +340,8 @@ export default function Home() {
     return { name, total: contributions - withdrawals };
   });
   const openNew = () => {
+    if (savingRef.current) return;
+    draftId.current = null;
     setEditing(null);
     setValuation("");
     setMovementKind("aporte");
@@ -341,6 +351,8 @@ export default function Home() {
     setModalOpen(true);
   };
   const openEdit = (entry: Entry) => {
+    if (savingRef.current) return;
+    draftId.current = null;
     setEditing(entry);
     setValuation("");
     setMovementKind(entry.kind === "retiro" ? "retiro" : "aporte");
@@ -353,6 +365,8 @@ export default function Home() {
     sourceType?: "envelope" | "investment",
     sourceName?: string,
   ) => {
+    if (savingRef.current) return;
+    draftId.current = null;
     setEditing(null);
     setValuation("");
     setMovementKind("retiro");
@@ -375,9 +389,11 @@ export default function Home() {
       }
     }, 0);
   };
-  const saveEntry = (event: FormEvent<HTMLFormElement>) => {
+  const saveEntry = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    if (savingRef.current) return;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const amount = parseAmount(String(form.get("amount")));
     const currentText = String(form.get("currentValue") || "");
     const envelope = String(
@@ -391,7 +407,7 @@ export default function Home() {
       return;
     }
     const entry: Entry = {
-      id: editing?.id || crypto.randomUUID(),
+      id: editing?.id || (draftId.current ??= crypto.randomUUID()),
       envelope,
       investment,
       account: String(
@@ -413,26 +429,28 @@ export default function Home() {
     const next = editing
       ? entries.map((item) => (item.id === entry.id ? entry : item))
       : [entry, ...entries];
-    void persistEntries(next);
-    const nextEnvelopes = entry.envelope && !envelopes.includes(entry.envelope)
-      ? [...envelopes, entry.envelope]
-      : envelopes;
-    const nextInvestments = entry.investment && !investments.includes(entry.investment)
-      ? [...investments, entry.investment]
-      : investments;
-    const nextAccounts = entry.account && !accounts.includes(entry.account)
-      ? [...accounts, entry.account]
-      : accounts;
-    void persistLists(nextEnvelopes, nextInvestments, nextAccounts);
+    const saved = await runMutation(async (userId, session) => {
+      const lists = await saveFinancialLists(
+        supabase, userId, { envelopes, investments, accounts },
+        { envelopes: [entry.envelope], investments: [entry.investment], accounts: [entry.account] },
+        undefined, () => assertSession(session),
+      );
+      cacheLists(lists, session);
+      await saveFinancialEntry(supabase, userId, entry, editing ? "edit" : "create");
+      cacheEntries(next, session);
+    });
+    if (!saved) return;
+    draftId.current = null;
     setModalOpen(false);
     setEditing(null);
-    event.currentTarget.reset();
+    formElement.reset();
   };
-  const saveValuation = (event: FormEvent<HTMLFormElement>) => {
+  const saveValuation = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (savingRef.current) return;
     const form = new FormData(event.currentTarget);
     const entry: Entry = {
-      id: crypto.randomUUID(),
+      id: draftId.current ??= crypto.randomUUID(),
       envelope: "",
       investment: valuation,
       account: String(form.get("account")),
@@ -445,40 +463,71 @@ export default function Home() {
       kind: "valuacion",
     };
     const next = [entry, ...entries];
-    void persistEntries(next);
+    const saved = await runMutation(async (userId, session) => {
+      const lists = await saveFinancialLists(
+        supabase, userId, { envelopes, investments, accounts },
+        { investments: [entry.investment], accounts: [entry.account] },
+        undefined, () => assertSession(session),
+      );
+      cacheLists(lists, session);
+      await saveFinancialEntry(supabase, userId, entry, "create");
+      cacheEntries(next, session);
+    });
+    if (!saved) return;
+    draftId.current = null;
     setModalOpen(false);
     setValuation("");
   };
-  const deleteEntry = (id: string) => {
+  const deleteEntry = async (id: string) => {
     const next = entries.filter((entry) => entry.id !== id);
-    void persistEntries(next);
+    await runMutation(async (userId, session) => {
+      await deleteFinancialEntry(supabase, userId, id);
+      cacheEntries(next, session);
+    });
   };
-  const renameEnvelope = (oldName: string) => {
+  const renameEnvelope = async (oldName: string) => {
+    if (savingRef.current) return;
     const newName = window.prompt("Nuevo nombre del sobre", oldName)?.trim();
     if (!newName || newName === oldName || envelopes.includes(newName)) return;
-    const nextEnvelopes = envelopes.map((name) =>
-      name === oldName ? newName : name,
-    );
     const nextEntries = entries.map((entry) =>
       entry.envelope === oldName ? { ...entry, envelope: newName } : entry,
     );
-    setEnvelopes(nextEnvelopes);
-    void persistEntries(nextEntries);
-    void persistLists(nextEnvelopes, investments, accounts);
+    await runMutation(async (userId, session) => {
+      await changeFinancialEnvelope(supabase, userId, oldName, newName);
+      cacheEntries(nextEntries, session);
+      try {
+        cacheLists(await saveFinancialLists(
+          supabase, userId, { envelopes, investments, accounts }, {}, { oldName, newName },
+          () => assertSession(session),
+        ), session);
+      } catch {
+        throw new Error("Los movimientos cambiaron de sobre, pero no se pudo actualizar su lista local o remota. Reintentá renombrar el sobre para completar la operación.");
+      }
+    });
   };
-  const removeEnvelope = (name: string) => {
+  const removeEnvelope = async (name: string) => {
+    if (savingRef.current) return;
     if (
       !window.confirm(
         `¿Eliminar el sobre "${name}"? Sus cargas quedarán sin sobre.`,
       )
     )
       return;
-    const nextEnvelopes = envelopes.filter((item) => item !== name);
     const nextEntries = entries.map((entry) =>
       entry.envelope === name ? { ...entry, envelope: "" } : entry,
     );
-    void persistEntries(nextEntries);
-    void persistLists(nextEnvelopes, investments, accounts);
+    await runMutation(async (userId, session) => {
+      await changeFinancialEnvelope(supabase, userId, name, "");
+      cacheEntries(nextEntries, session);
+      try {
+        cacheLists(await saveFinancialLists(
+          supabase, userId, { envelopes, investments, accounts }, {}, { oldName: name, newName: "" },
+          () => assertSession(session),
+        ), session);
+      } catch {
+        throw new Error("Los movimientos quedaron sin sobre, pero no se pudo actualizar su lista local o remota. Reintentá quitar el sobre para completar la operación.");
+      }
+    });
   };
 
   if (authLoading) {
@@ -556,19 +605,19 @@ export default function Home() {
           >
             {isDark ? "☀" : "☾"}
           </button>
-          <button className="text-button" onClick={() => void supabase.auth.signOut()}>
+          <button className="text-button" disabled={isSaving} onClick={() => void supabase.auth.signOut()}>
             Cerrar sesión
           </button>
         </header>
         <div className={`sync-status ${syncStatus}`} role="status">
-          {authError || (syncStatus === "synced" ? "Sincronizado con la nube" : "Guardado localmente")}
+          {isSaving ? "Guardando cambios..." : authError || (syncStatus === "synced" ? "Sincronizado con la nube" : "Guardado localmente")}
         </div>
         <section className="welcome-row" id="resumen">
           <div>
             <h2>Tu patrimonio, en perspectiva.</h2>
             <p>Estos son tus números al día de hoy.</p>
           </div>
-          <button className="primary-button" onClick={openNew}>
+          <button className="primary-button" disabled={isSaving} onClick={openNew}>
             + Registrar actualización
           </button>
         </section>
@@ -617,7 +666,7 @@ export default function Home() {
                 <h3>Tus sobres</h3>
                 <p>Saldos acumulados por objetivo</p>
               </div>
-              <button className="text-button" onClick={openNew}>
+              <button className="text-button" disabled={isSaving} onClick={openNew}>
                 Nuevo sobre
               </button>
             </div>
@@ -637,6 +686,7 @@ export default function Home() {
                       <button
                         type="button"
                         className="action-button"
+                        disabled={isSaving}
                         onClick={() => openWithdrawal("envelope", item.name)}
                       >
                         Extraer
@@ -644,6 +694,7 @@ export default function Home() {
                       <button
                         type="button"
                         className="edit-button"
+                        disabled={isSaving}
                         aria-label={`Renombrar ${item.name}`}
                         onClick={() => renameEnvelope(item.name)}
                       >
@@ -652,6 +703,7 @@ export default function Home() {
                       <button
                         type="button"
                         className="delete-button"
+                        disabled={isSaving}
                         aria-label={`Eliminar ${item.name}`}
                         onClick={() => removeEnvelope(item.name)}
                       >
@@ -707,6 +759,7 @@ export default function Home() {
                       </b>
                       <button
                         className="edit-button"
+                        disabled={isSaving}
                         onClick={() => openEdit(entry)}
                         aria-label="Editar carga"
                       >
@@ -714,6 +767,7 @@ export default function Home() {
                       </button>
                       <button
                         className="delete-button"
+                        disabled={isSaving}
                         onClick={() => deleteEntry(entry.id)}
                         aria-label="Borrar carga"
                       >
@@ -805,7 +859,10 @@ export default function Home() {
                 <div className="investment-actions">
                   <button
                     className="text-button"
+                    disabled={isSaving}
                     onClick={() => {
+                      if (savingRef.current) return;
+                      draftId.current = null;
                       setValuation(name);
                       setEditing(null);
                       setModalOpen(true);
@@ -816,6 +873,7 @@ export default function Home() {
                   <button
                     type="button"
                     className="action-button"
+                    disabled={isSaving}
                     onClick={() => openWithdrawal("investment", name)}
                   >
                     Extraer
@@ -831,7 +889,7 @@ export default function Home() {
           className="modal-backdrop"
           role="presentation"
           onMouseDown={(event) =>
-            event.target === event.currentTarget && setModalOpen(false)
+            !savingRef.current && event.target === event.currentTarget && setModalOpen(false)
           }
         >
           <section className="modal" role="dialog" aria-modal="true">
@@ -850,6 +908,7 @@ export default function Home() {
               </div>
               <button
                 className="close-button"
+                disabled={isSaving}
                 onClick={() => {
                   setModalOpen(false);
                   setValuation("");
@@ -859,9 +918,10 @@ export default function Home() {
                 ×
               </button>
             </div>
+            {authError && <p className="auth-error" role="alert">{authError}</p>}
             {valuation ? (
               <form onSubmit={saveValuation}>
-                <div className="form-grid">
+                <fieldset className="form-grid" disabled={isSaving}>
                   <label>
                     Valor actual
                     <input
@@ -913,7 +973,7 @@ export default function Home() {
                       readOnly
                     />
                   </label>
-                </div>
+                </fieldset>
                 <p className="form-hint">
                   Esta valuación no modifica el capital aportado.
                 </p>
@@ -921,16 +981,17 @@ export default function Home() {
                   <button
                     type="button"
                     className="secondary-button"
+                    disabled={isSaving}
                     onClick={() => setValuation("")}
                   >
                     Cancelar
                   </button>
-                  <button className="primary-button">Guardar valuación</button>
+                  <button className="primary-button" disabled={isSaving}>{isSaving ? "Guardando..." : "Guardar valuación"}</button>
                 </div>
               </form>
             ) : (
               <form onSubmit={saveEntry}>
-                <div className="form-grid">
+                <fieldset className="form-grid" disabled={isSaving}>
                   <label>
                     Tipo de movimiento
                     <select
@@ -1051,7 +1112,7 @@ export default function Home() {
                       name="exchangeRate"
                       required
                       inputMode="decimal"
-                      defaultValue={editing?.exchangeRate ? formatMoneyInput(String(editing.exchangeRate)) : "1"}
+                      defaultValue={formatMoneyValue(editing?.exchangeRate ?? 1)}
                       placeholder="Ej. 1.450"
                       onChange={(event) => {
                         event.target.value = formatMoneyInput(event.target.value);
@@ -1067,7 +1128,7 @@ export default function Home() {
                       required
                       inputMode="decimal"
                       defaultValue={
-                        editing?.amount ? formatMoneyInput(String(editing.amount)) : ""
+                        editing ? formatMoneyValue(editing.amount) : ""
                       }
                       placeholder="10.000,50"
                       onChange={(event) => {
@@ -1083,8 +1144,8 @@ export default function Home() {
                         name="currentValue"
                         inputMode="decimal"
                         defaultValue={
-                          editing?.currentValue
-                            ? formatMoneyInput(String(editing.currentValue))
+                          editing
+                            ? formatMoneyValue(editing.currentValue)
                             : ""
                         }
                         placeholder="Si lo dejás vacío, usamos el capital"
@@ -1104,7 +1165,7 @@ export default function Home() {
                       readOnly
                     />
                   </label>
-                </div>
+                </fieldset>
                 <p className="form-hint">
                   Elegí una opción existente o seleccioná “crear nuevo”. Nunca
                   se guardan ambas opciones juntas.
@@ -1113,12 +1174,13 @@ export default function Home() {
                   <button
                     type="button"
                     className="secondary-button"
+                    disabled={isSaving}
                     onClick={() => setModalOpen(false)}
                   >
                     Cancelar
                   </button>
-                  <button className="primary-button">
-                    {editing ? "Guardar cambios" : "Guardar actualización"}
+                  <button className="primary-button" disabled={isSaving}>
+                    {isSaving ? "Guardando..." : editing ? "Guardar cambios" : "Guardar actualización"}
                   </button>
                 </div>
               </form>
