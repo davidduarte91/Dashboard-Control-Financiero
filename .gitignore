@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local migration reports with personal financial data
+migration-preview-data.json
+migration-preview-report.md
+migration-manual-review.md
