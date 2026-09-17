@@ -92,16 +92,24 @@ with mapped as (
      or e.id in ('d86b3a8a-4042-4962-ad39-0c894c08263c','577a29e7-52f2-4f59-a260-df73f19ed793','0233822a-83ac-4048-aa7b-92f290ae8688')
 ), dimensions as (
   select distinct user_id, envelope, investment, account from mapped
-)
-insert into public.financial_envelopes (user_id,name) select user_id,envelope from dimensions on conflict do nothing;
+), inserted as (
+  insert into public.financial_envelopes (user_id,name) select user_id,envelope from dimensions on conflict do nothing returning id,user_id
+) insert into public.financial_v2_migration_objects (migration_key,object_type,object_id,user_id)
+  select 'v1_to_v2_approved_2026_09_17','envelope',id,user_id from inserted on conflict do nothing;
 with mapped as (
   select e.user_id, case when e.id in ('d86b3a8a-4042-4962-ad39-0c894c08263c','577a29e7-52f2-4f59-a260-df73f19ed793','0233822a-83ac-4048-aa7b-92f290ae8688') then 'Ahorro David' else btrim(e.envelope) end envelope, btrim(e.investment) investment, btrim(e.account) account
   from public.financial_entries e where e.kind='aporte' or e.id in ('d86b3a8a-4042-4962-ad39-0c894c08263c','577a29e7-52f2-4f59-a260-df73f19ed793','0233822a-83ac-4048-aa7b-92f290ae8688')
-) insert into public.financial_investments (user_id,name) select distinct user_id,investment from mapped on conflict do nothing;
+), inserted as (
+  insert into public.financial_investments (user_id,name) select distinct user_id,investment from mapped on conflict do nothing returning id,user_id
+) insert into public.financial_v2_migration_objects (migration_key,object_type,object_id,user_id)
+  select 'v1_to_v2_approved_2026_09_17','investment',id,user_id from inserted on conflict do nothing;
 with mapped as (
   select e.user_id, case when e.id in ('d86b3a8a-4042-4962-ad39-0c894c08263c','577a29e7-52f2-4f59-a260-df73f19ed793','0233822a-83ac-4048-aa7b-92f290ae8688') then 'Ahorro David' else btrim(e.envelope) end envelope, btrim(e.investment) investment, btrim(e.account) account
   from public.financial_entries e where e.kind='aporte' or e.id in ('d86b3a8a-4042-4962-ad39-0c894c08263c','577a29e7-52f2-4f59-a260-df73f19ed793','0233822a-83ac-4048-aa7b-92f290ae8688')
-) insert into public.financial_accounts (user_id,name) select distinct user_id,account from mapped on conflict do nothing;
+), inserted as (
+  insert into public.financial_accounts (user_id,name) select distinct user_id,account from mapped on conflict do nothing returning id,user_id
+) insert into public.financial_v2_migration_objects (migration_key,object_type,object_id,user_id)
+  select 'v1_to_v2_approved_2026_09_17','account',id,user_id from inserted on conflict do nothing;
 
 with mapped as (
   select e.id legacy_entry_id, e.user_id,
@@ -170,6 +178,9 @@ begin
   if (select count(*) from public.financial_position_movements where legacy_entry_id is not null) <> 22 then raise exception 'EXPECTED_22_CONTRIBUTIONS_NOT_MIGRATED'; end if;
   if (select count(*) from public.financial_position_valuations where legacy_entry_id is not null) <> 3 then raise exception 'EXPECTED_3_VALUATIONS_NOT_MIGRATED'; end if;
   if (select count(*) from public.financial_positions) <> 10 then raise exception 'EXPECTED_10_POSITIONS_NOT_MIGRATED'; end if;
+  if (select count(*) from public.financial_v2_migration_objects where migration_key='v1_to_v2_approved_2026_09_17' and object_type='envelope') <> 5 then raise exception 'EXPECTED_5_ENVELOPES_NOT_TRACKED'; end if;
+  if (select count(*) from public.financial_v2_migration_objects where migration_key='v1_to_v2_approved_2026_09_17' and object_type='investment') <> 6 then raise exception 'EXPECTED_6_INVESTMENTS_NOT_TRACKED'; end if;
+  if (select count(*) from public.financial_v2_migration_objects where migration_key='v1_to_v2_approved_2026_09_17' and object_type='account') <> 2 then raise exception 'EXPECTED_2_ACCOUNTS_NOT_TRACKED'; end if;
   if exists (select 1 from public.financial_position_valuations where legacy_entry_id='102bd81b-d7c4-45e8-86a8-c56305cdf03e') then raise exception 'AGGREGATE_VALUATION_WAS_APPLIED'; end if;
   if (select coalesce(sum(m.amount),0) from public.financial_position_movements m join public.financial_positions p on p.id=m.position_id where m.kind='contribution' and p.currency='ARS') <> 1781702.93 then raise exception 'MIGRATED_ARS_TOTAL_CHANGED'; end if;
   if (select coalesce(sum(m.amount),0) from public.financial_position_movements m join public.financial_positions p on p.id=m.position_id where m.kind='contribution' and p.currency='USD') <> 330.78 then raise exception 'MIGRATED_USD_TOTAL_CHANGED'; end if;
