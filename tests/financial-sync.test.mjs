@@ -295,6 +295,19 @@ function sessionHarness(client, options = {}) {
   };
   ui.defaults = ["FCI"];
   ui.localStorage = options.storage || memoryStorage();
+  ui.v2Dashboard = null;
+  ui.v2ReadError = false;
+  ui.setV2Dashboard = (value) => { ui.v2Dashboard = value; };
+  ui.setV2ReadError = (value) => { ui.v2ReadError = value; };
+  ui.setV2ContributionOpen = (value) => { ui.v2ContributionOpen = value; };
+  ui.setV2ContributionPositionId = (value) => { ui.v2ContributionPositionId = value; };
+  ui.setV2ContributionAmount = (value) => { ui.v2ContributionAmount = value; };
+  ui.setV2ContributionError = (value) => { ui.v2ContributionError = value; };
+  ui.setV2ContributionMessage = (value) => { ui.v2ContributionMessage = value; };
+  ui.setV2ContributionSaving = (value) => { ui.isV2ContributionSaving = value; };
+  ui.v2ContributionSavingRef = { current: false };
+  ui.buildV2Dashboard = (value) => value;
+  ui.readFinancialV2 = options.readFinancialV2 || (async () => ({ positions: [], snapshots: [] }));
   for (const [setter, key] of Object.entries({ setUser: "user", setDark: "isDark", setToday: "today", setHydrated: "hydrated", setAuthLoading: "authLoading", setHistoryOpen: "historyOpen", setAuthEmail: "authEmail", setAuthPassword: "authPassword" })) {
     ui[setter] = (value) => { ui[key] = value; };
   }
@@ -343,6 +356,15 @@ test("caches are scoped to their owner and legacy data is never read, changed or
     assert.equal(storage.reads.includes(key), false);
     assert.equal(storage.writes.includes(key), false);
   }
+});
+
+test("un fallo de lectura v2 conserva la vista v1 como respaldo", async () => {
+  const client = fakeClient({ entries: [row("a", "u1")], lists: [{ user_id: "u1", envelopes: ["Origen"], investments: ["FCI"], accounts: ["Banco"] }] });
+  const ui = sessionHarness(client, { userId: "u1", readFinancialV2: async () => { throw new Error("RLS"); } });
+  await ui.flush();
+  assert.equal(ui.entries[0].id, "a");
+  assert.equal(ui.v2Dashboard, null);
+  assert.equal(ui.v2ReadError, true);
 });
 
 test("invalid, foreign-owner and unavailable caches fail closed", () => {

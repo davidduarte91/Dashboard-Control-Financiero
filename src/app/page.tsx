@@ -18,6 +18,8 @@ import {
   type FinancialSession,
   type FinancialSnapshot,
 } from "@/lib/financial-cache";
+import { buildV2Dashboard, readFinancialV2, type V2Dashboard } from "@/lib/financial-v2-read";
+import { canApplyContributionResult, createContributionRequest, recordContribution, type ContributionRequest } from "@/lib/financial-v2-write";
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
 const descriptions: Record<string, string> = {
   FCI: "Fondos comunes de inversión",
@@ -79,8 +81,18 @@ export default function Home() {
     [authError, setAuthError] = useState(""),
     [syncStatus, setSyncStatus] = useState<"local" | "synced" | "error">("local");
   const [isSaving, setSaving] = useState(false);
+  const [v2Dashboard, setV2Dashboard] = useState<V2Dashboard | null>(null);
+  const [v2ReadError, setV2ReadError] = useState(false);
+  const [v2ContributionOpen, setV2ContributionOpen] = useState(false);
+  const [v2ContributionPositionId, setV2ContributionPositionId] = useState("");
+  const [v2ContributionAmount, setV2ContributionAmount] = useState("");
+  const [v2ContributionError, setV2ContributionError] = useState("");
+  const [v2ContributionMessage, setV2ContributionMessage] = useState("");
+  const [isV2ContributionSaving, setV2ContributionSaving] = useState(false);
   const savingRef = useRef(false);
   const draftId = useRef<string | null>(null);
+  const v2ContributionSavingRef = useRef(false);
+  const v2ContributionRequestRef = useRef<{ userId: string; request: ContributionRequest } | null>(null);
   const sessionRef = useRef<FinancialSession>({ userId: null, ready: false });
   const snapshotRef = useRef<FinancialSnapshot>({
     entries: [], lists: { envelopes: [], investments: defaults, accounts: [] },
@@ -134,6 +146,12 @@ export default function Home() {
         showSnapshot(snapshot);
         setSyncStatus("synced");
         try {
+          const v2 = buildV2Dashboard(await readFinancialV2(supabase, session.userId));
+          if (isCurrent(session)) { setV2Dashboard(v2); setV2ReadError(false); }
+        } catch {
+          if (isCurrent(session)) { setV2Dashboard(null); setV2ReadError(true); }
+        }
+        try {
           writeFinancialCache(localStorage, session.userId, snapshot);
         } catch {
           setAuthError("Datos cargados desde la nube; no se pudo guardar una copia local en este navegador.");
@@ -177,6 +195,15 @@ export default function Home() {
       savingRef.current = false;
       draftId.current = null;
       showSnapshot({ entries: [], lists: { envelopes: [], investments: defaults, accounts: [] } });
+      setV2Dashboard(null);
+      setV2ReadError(false);
+      setV2ContributionOpen(false);
+      setV2ContributionPositionId("");
+      setV2ContributionAmount("");
+      setV2ContributionError("");
+      setV2ContributionMessage("");
+      setV2ContributionSaving(false);
+      v2ContributionSavingRef.current = false;
       setSaving(false);
       setModalOpen(false);
       setEditing(null);
@@ -388,6 +415,61 @@ export default function Home() {
         if (select) select.value = sourceName || "";
       }
     }, 0);
+  };
+  const selectedV2Position = v2Dashboard?.positions.find((position) => position.id === v2ContributionPositionId);
+  const openV2Contribution = () => {
+    if (!v2Dashboard?.positions.length || v2ContributionSavingRef.current) return;
+    setV2ContributionPositionId(v2Dashboard.positions.find((position) => !position.archivedAt)?.id || "");
+    setV2ContributionAmount("");
+    setV2ContributionError("");
+    setV2ContributionMessage("");
+    setV2ContributionOpen(true);
+  };
+  const saveV2Contribution = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (v2ContributionSavingRef.current) return;
+    const session = sessionRef.current;
+    const position = v2Dashboard?.positions.find((item) => item.id === v2ContributionPositionId && !item.archivedAt);
+    const amount = parseAmount(v2ContributionAmount);
+    if (!session.userId || !position || !Number.isFinite(amount) || amount <= 0) {
+      setV2ContributionError("Elegí una posición v2 activa e ingresá un importe positivo.");
+      return;
+    }
+    const pending = v2ContributionRequestRef.current;
+    const isSameLogicalAttempt = pending?.userId === session.userId
+      && pending.request.positionId === position.id && pending.request.amount === amount;
+    const request = isSameLogicalAttempt
+      ? pending.request
+      : createContributionRequest(position.id, amount);
+    if (!isSameLogicalAttempt) v2ContributionRequestRef.current = { userId: session.userId, request };
+    v2ContributionSavingRef.current = true;
+    setV2ContributionSaving(true);
+    setV2ContributionError("");
+    setV2ContributionMessage("");
+    let contributionRecorded = false;
+    try {
+      await recordContribution(supabase, request);
+      contributionRecorded = true;
+      const refreshed = buildV2Dashboard(await readFinancialV2(supabase, session.userId));
+      if (!canApplyContributionResult(session, sessionRef.current)) return;
+      setV2Dashboard(refreshed);
+      setV2ReadError(false);
+      v2ContributionRequestRef.current = null;
+      setV2ContributionAmount("");
+      setV2ContributionOpen(false);
+      setV2ContributionMessage("Aporte v2 registrado y snapshot actualizado desde el servidor.");
+    } catch (error) {
+      if (!canApplyContributionResult(session, sessionRef.current)) return;
+      const detail = error instanceof Error ? error.message : "Error desconocido";
+      setV2ContributionError(contributionRecorded
+        ? `El aporte quedó registrado, pero no se pudo refrescar v2. Reintentá: se reutilizará el mismo request_id. (${detail})`
+        : `No se pudo registrar el aporte v2. Podés reintentar sin duplicarlo. (${detail})`);
+    } finally {
+      if (canApplyContributionResult(session, sessionRef.current)) {
+        v2ContributionSavingRef.current = false;
+        setV2ContributionSaving(false);
+      }
+    }
   };
   const saveEntry = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -612,6 +694,48 @@ export default function Home() {
         <div className={`sync-status ${syncStatus}`} role="status">
           {isSaving ? "Guardando cambios..." : authError || (syncStatus === "synced" ? "Sincronizado con la nube" : "Guardado localmente")}
         </div>
+        {v2Dashboard ? (
+          <section className="panel" aria-label="Resumen financiero v2">
+            <div className="panel-header"><div><h3>Modelo v2</h3><p>Lectura de posiciones y snapshots; las escrituras v1 se mantienen como respaldo.</p></div><button className="secondary-button" type="button" disabled={!v2Dashboard.positions.some((position) => !position.archivedAt) || isV2ContributionSaving} onClick={openV2Contribution}>Registrar aporte v2</button></div>
+            {v2ContributionOpen && <form className="form-grid" onSubmit={saveV2Contribution}>
+              <label>
+                Posición v2
+                <select value={v2ContributionPositionId} onChange={(event) => { setV2ContributionPositionId(event.target.value); setV2ContributionError(""); }} disabled={isV2ContributionSaving}>
+                  {v2Dashboard.positions.filter((position) => !position.archivedAt).map((position) => <option key={position.id} value={position.id}>{v2Dashboard.envelopeName[position.envelopeId]} · {v2Dashboard.investmentName[position.investmentId]} · {v2Dashboard.accountName[position.accountId]} · {position.currency}</option>)}
+                </select>
+              </label>
+              <label>
+                Importe del aporte
+                <input required inputMode="decimal" value={v2ContributionAmount} placeholder="10.000,50" disabled={isV2ContributionSaving} onChange={(event) => setV2ContributionAmount(formatMoneyInput(event.target.value))} />
+              </label>
+              {selectedV2Position && <p className="form-hint">Destino: {v2Dashboard.envelopeName[selectedV2Position.envelopeId]} · {v2Dashboard.investmentName[selectedV2Position.investmentId]} · {v2Dashboard.accountName[selectedV2Position.accountId]} · {selectedV2Position.currency}. Se registrará con la fecha y hora actual en UTC.</p>}
+              {v2ContributionError && <p className="auth-error" role="alert">{v2ContributionError}</p>}
+              <div className="modal-actions"><button type="button" className="secondary-button" disabled={isV2ContributionSaving} onClick={() => { setV2ContributionOpen(false); setV2ContributionError(""); }}>Cancelar</button><button className="primary-button" disabled={isV2ContributionSaving}>{isV2ContributionSaving ? "Guardando aporte v2..." : "Guardar aporte v2"}</button></div>
+            </form>}
+            {v2ContributionMessage && <p className="positive" role="status">{v2ContributionMessage}</p>}
+            {!v2Dashboard.complete && <p className="muted">Hay posiciones sin snapshot; se muestra v1 como respaldo.</p>}
+            {v2Dashboard.envelopeGroups.map((group) => (
+              <div className="envelope-item" key={group.groupId}>
+                <div className="envelope-details"><strong>{v2Dashboard.envelopeName[group.groupId]}</strong>
+                  {Object.entries(group.native).map(([currency, value]) => <div className="envelope-balance-line" key={currency}><small>{currency}: capital {formatMoneyValue(value.historicalContributions)} · rendimiento {formatMoneyValue(value.historicalPerformance)}</small><b>{money(value.currentValue, currency as Currency)}</b></div>)}
+                  {v2Dashboard.positions.filter((position) => position.envelopeId === group.groupId).map((position) => {
+                    const snapshot = v2Dashboard.snapshots.find((item) => item.positionId === position.id);
+                    return <small className="muted" key={position.id}>{v2Dashboard.investmentName[position.investmentId]} · {v2Dashboard.accountName[position.accountId]} · {position.currency}{snapshot ? `: ${money(snapshot.currentValue, position.currency)}` : " · sin snapshot"}</small>;
+                  })}
+                </div>
+              </div>
+            ))}
+            <div className="panel-header"><div><h3>Inversiones por posición</h3><p>Cada moneda conserva su propio total.</p></div></div>
+            {v2Dashboard.investmentGroups.map((group) => (
+              <div className="envelope-item" key={group.groupId}>
+                <div className="envelope-details"><strong>{v2Dashboard.investmentName[group.groupId]}</strong>
+                  {Object.entries(group.native).map(([currency, value]) => <div className="envelope-balance-line" key={currency}><small>{currency}: capital {formatMoneyValue(value.historicalContributions)} · rendimiento {formatMoneyValue(value.historicalPerformance)}</small><b>{money(value.currentValue, currency as Currency)}</b></div>)}
+                </div>
+              </div>
+            ))}
+            <p className="muted">Las monedas se muestran separadas. {v2Dashboard.hasPendingSbsReconciliation ? "SBS RTA PESOS conserva una valuación legacy multi-sobre pendiente de reconciliación." : ""}</p>
+          </section>
+        ) : v2ReadError ? <p className="muted">No se pudo leer v2; se mantiene la vista v1 como respaldo.</p> : null}
         <section className="welcome-row" id="resumen">
           <div>
             <h2>Tu patrimonio, en perspectiva.</h2>
