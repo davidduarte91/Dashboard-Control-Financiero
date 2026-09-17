@@ -44,3 +44,8 @@ next-env.d.ts
 migration-preview-data.json
 migration-preview-report.md
 migration-manual-review.md
+
+# Supabase CLI local files
+supabase/.temp/
+# Local database backups
+supabase-production-backup.sql
