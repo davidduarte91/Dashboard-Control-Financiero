@@ -183,7 +183,7 @@ function memoryStorage(initial = {}) {
 }
 
 function formHarness(client) {
-  const names = new Set(["assertSession", "cacheEntries", "cacheLists", "runMutation", "saveEntry", "saveValuation", "renameEnvelope", "removeEnvelope"]);
+  const names = new Set(["assertSession", "cacheEntries", "cacheLists", "runMutation", "saveMainV2Contribution", "saveEntry", "saveValuation", "renameEnvelope", "removeEnvelope"]);
   const declarations = home.body.statements.filter((node) => ts.isVariableStatement(node)
     && node.declarationList.declarations.some((decl) => names.has(decl.name.getText(pageAst))));
   const context = vm.createContext({
@@ -244,11 +244,39 @@ test("un aporte del formulario principal usa v2 y no inserta una entrada v1", as
     envelopeName: { e: "Origen" }, investmentName: { i: "FCI" }, accountName: { a: "Banco" },
   };
   let positionId = null;
-  ui.recordV2Contribution = async (id, amount) => { positionId = `${id}:${amount}`; return true; };
+  let v2Calls = 0;
+  ui.recordV2Contribution = async (id, amount) => { v2Calls += 1; positionId = `${id}:${amount}`; return true; };
   await ui.handlers.saveEntry(ui.event);
   assert.equal(positionId, "position-ars:100.5");
+  assert.equal(v2Calls, 1);
   assert.equal(client.tables.financial_entries.length, 0);
+  assert.equal(client.calls.filter((call) => call.table === "financial_lists" && call.kind !== "select").length, 0);
   assert.equal(ui.isModalOpen, false);
+});
+
+test("un fallo artificial de financial_lists no afecta un aporte v2", async () => {
+  const client = fakeClient();
+  client.failures.push({ table: "financial_lists", kind: "upsert", message: "Lists denied" });
+  const ui = formHarness(client);
+  ui.movementKind = "aporte";
+  ui.v2Dashboard = { positions: [{ id: "position-ars", envelopeId: "e", investmentId: "i", accountId: "a", currency: "ARS" }], envelopeName: { e: "Origen" }, investmentName: { i: "FCI" }, accountName: { a: "Banco" } };
+  ui.recordV2Contribution = async () => true;
+  await ui.handlers.saveEntry(ui.event);
+  assert.equal(client.tables.financial_entries.length, 0);
+  assert.equal(client.calls.some((call) => call.table === "financial_lists" && call.kind !== "select"), false);
+  assert.equal(ui.v2ContributionError, "");
+});
+
+test("un error del aporte v2 no deja una escritura parcial en v1", async () => {
+  const client = fakeClient();
+  const ui = formHarness(client);
+  ui.movementKind = "aporte";
+  ui.v2Dashboard = { positions: [{ id: "position-ars", envelopeId: "e", investmentId: "i", accountId: "a", currency: "ARS" }], envelopeName: { e: "Origen" }, investmentName: { i: "FCI" }, accountName: { a: "Banco" } };
+  ui.recordV2Contribution = async () => false;
+  await ui.handlers.saveEntry(ui.event);
+  assert.equal(client.tables.financial_entries.length, 0);
+  assert.equal(client.calls.some((call) => call.table === "financial_lists" && call.kind !== "select"), false);
+  assert.equal(ui.isModalOpen, true);
 });
 
 test("una combinación sin posición v2 no escribe en v1", async () => {

@@ -515,10 +515,50 @@ export default function Home() {
       setV2ContributionOpen(false);
     }
   };
+  const saveMainV2Contribution = async (formElement: HTMLFormElement) => {
+    const form = new FormData(formElement);
+    const amount = parseAmount(String(form.get("amount")));
+    const envelope = String(
+      form.get(envelopeMode === "new" ? "newEnvelope" : "envelope") || "",
+    );
+    const investment = String(
+      form.get(investmentMode === "new" ? "newInvestment" : "investment") || "",
+    );
+    const account = String(
+      form.get(accountMode === "new" ? "newAccount" : "account") || "",
+    );
+    const currency = form.get("currency") as Currency;
+    if (!v2Dashboard) {
+      setV2ContributionError("No se puede registrar un aporte hasta que cargue el modelo v2. El aporte no se guardó en v1.");
+      return;
+    }
+    if (envelopeMode === "new" || investmentMode === "new" || accountMode === "new") {
+      setV2ContributionError("La creación de posiciones v2 todavía requiere una RPC de backend. Elegí una combinación existente.");
+      return;
+    }
+    const position = resolveExistingContributionPosition(v2Dashboard.positions, v2Dashboard, {
+      envelope, investment, account, currency,
+    });
+    if (!position) {
+      setV2ContributionError("No existe una posición v2 para esta combinación. No se creó ni se registró ningún aporte; falta una RPC segura para crear o resolver posiciones.");
+      return;
+    }
+    const saved = await recordV2Contribution(position.id, amount);
+    if (saved) {
+      draftId.current = null;
+      setModalOpen(false);
+      formElement.reset();
+    }
+  };
   const saveEntry = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (savingRef.current) return;
     const formElement = event.currentTarget;
+    // Route new contributions before any v1 helper, list synchronization or Entry construction.
+    if (movementKind === "aporte" && !editing) {
+      await saveMainV2Contribution(formElement);
+      return;
+    }
+    if (savingRef.current) return;
     const form = new FormData(formElement);
     const amount = parseAmount(String(form.get("amount")));
     const currentText = String(form.get("currentValue") || "");
@@ -532,30 +572,6 @@ export default function Home() {
       form.get(accountMode === "new" ? "newAccount" : "account") || "",
     );
     const currency = form.get("currency") as Currency;
-    if (movementKind === "aporte" && !editing) {
-      if (!v2Dashboard) {
-        setV2ContributionError("No se puede registrar un aporte hasta que cargue el modelo v2. El aporte no se guardó en v1.");
-        return;
-      }
-      if (envelopeMode === "new" || investmentMode === "new" || accountMode === "new") {
-        setV2ContributionError("La creación de posiciones v2 todavía requiere una RPC de backend. Elegí una combinación existente.");
-        return;
-      }
-      const position = resolveExistingContributionPosition(v2Dashboard.positions, v2Dashboard, {
-        envelope, investment, account, currency,
-      });
-      if (!position) {
-        setV2ContributionError("No existe una posición v2 para esta combinación. No se creó ni se registró ningún aporte; falta una RPC segura para crear o resolver posiciones.");
-        return;
-      }
-      const saved = await recordV2Contribution(position.id, amount);
-      if (saved) {
-        draftId.current = null;
-        setModalOpen(false);
-        formElement.reset();
-      }
-      return;
-    }
     if (movementKind === "retiro" && !envelope && !investment) {
       window.alert("Elegí el sobre o la inversión de donde sale el dinero.");
       return;
