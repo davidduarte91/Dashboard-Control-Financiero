@@ -20,6 +20,7 @@ import {
 } from "@/lib/financial-cache";
 import { buildV2Dashboard, readFinancialV2, type V2Dashboard } from "@/lib/financial-v2-read";
 import { canApplyContributionResult, createContributionRequest, recordContribution, type ContributionRequest } from "@/lib/financial-v2-write";
+import { findPendingContribution, isDefinitiveContributionError, readPendingContributions, removePendingContribution, savePendingContribution, type PendingContribution } from "@/lib/financial-v2-pending";
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
 const descriptions: Record<string, string> = {
   FCI: "Fondos comunes de inversión",
@@ -89,6 +90,7 @@ export default function Home() {
   const [v2ContributionError, setV2ContributionError] = useState("");
   const [v2ContributionMessage, setV2ContributionMessage] = useState("");
   const [isV2ContributionSaving, setV2ContributionSaving] = useState(false);
+  const [v2PendingContributions, setV2PendingContributions] = useState<PendingContribution[]>([]);
   const savingRef = useRef(false);
   const draftId = useRef<string | null>(null);
   const v2ContributionSavingRef = useRef(false);
@@ -147,7 +149,11 @@ export default function Home() {
         setSyncStatus("synced");
         try {
           const v2 = buildV2Dashboard(await readFinancialV2(supabase, session.userId));
-          if (isCurrent(session)) { setV2Dashboard(v2); setV2ReadError(false); }
+          if (isCurrent(session)) {
+            setV2Dashboard(v2);
+            setV2ReadError(false);
+            try { setV2PendingContributions(readPendingContributions(localStorage, session.userId)); } catch { setV2PendingContributions([]); }
+          }
         } catch {
           if (isCurrent(session)) { setV2Dashboard(null); setV2ReadError(true); }
         }
@@ -203,6 +209,7 @@ export default function Home() {
       setV2ContributionError("");
       setV2ContributionMessage("");
       setV2ContributionSaving(false);
+      setV2PendingContributions([]);
       v2ContributionSavingRef.current = false;
       setSaving(false);
       setModalOpen(false);
@@ -436,34 +443,55 @@ export default function Home() {
       return;
     }
     const pending = v2ContributionRequestRef.current;
-    const isSameLogicalAttempt = pending?.userId === session.userId
-      && pending.request.positionId === position.id && pending.request.amount === amount;
-    const request = isSameLogicalAttempt
-      ? pending.request
-      : createContributionRequest(position.id, amount);
-    if (!isSameLogicalAttempt) v2ContributionRequestRef.current = { userId: session.userId, request };
+    const inMemory = pending?.userId === session.userId
+      && pending.request.positionId === position.id && pending.request.amount === amount
+      ? pending.request : null;
+    let stored: PendingContribution | null = null;
+    try { stored = findPendingContribution(localStorage, session.userId, position.id, amount); } catch { /* Refuse the write below if persistence is unavailable. */ }
+    const request = inMemory || stored || createContributionRequest(position.id, amount);
+    const isSafeRetry = Boolean(inMemory || stored);
+    try {
+      savePendingContribution(localStorage, {
+        userId: session.userId, ...request, operation: "contribution", status: "pending",
+        createdAt: stored?.createdAt || new Date().toISOString(),
+      });
+      setV2PendingContributions(readPendingContributions(localStorage, session.userId));
+    } catch {
+      setV2ContributionError("No se pudo guardar el reintento seguro de este aporte en este navegador.");
+      return;
+    }
+    v2ContributionRequestRef.current = { userId: session.userId, request };
     v2ContributionSavingRef.current = true;
     setV2ContributionSaving(true);
     setV2ContributionError("");
-    setV2ContributionMessage("");
+    setV2ContributionMessage(isSafeRetry ? "Reintentando de forma segura una operación v2 pendiente." : "");
     let contributionRecorded = false;
     try {
       await recordContribution(supabase, request);
       contributionRecorded = true;
+      try { removePendingContribution(localStorage, session.userId, request.requestId); } catch { /* The server result is authoritative; report the refresh outcome below. */ }
       const refreshed = buildV2Dashboard(await readFinancialV2(supabase, session.userId));
       if (!canApplyContributionResult(session, sessionRef.current)) return;
       setV2Dashboard(refreshed);
       setV2ReadError(false);
+      try { setV2PendingContributions(readPendingContributions(localStorage, session.userId)); } catch { setV2PendingContributions([]); }
       v2ContributionRequestRef.current = null;
       setV2ContributionAmount("");
       setV2ContributionOpen(false);
       setV2ContributionMessage("Aporte v2 registrado y snapshot actualizado desde el servidor.");
     } catch (error) {
+      const definitive = isDefinitiveContributionError(error);
+      if (definitive) {
+        try { removePendingContribution(localStorage, session.userId, request.requestId); } catch { /* The user still receives the server error. */ }
+      }
       if (!canApplyContributionResult(session, sessionRef.current)) return;
       const detail = error instanceof Error ? error.message : "Error desconocido";
+      try { setV2PendingContributions(readPendingContributions(localStorage, session.userId)); } catch { setV2PendingContributions([]); }
       setV2ContributionError(contributionRecorded
         ? `El aporte quedó registrado, pero no se pudo refrescar v2. Reintentá: se reutilizará el mismo request_id. (${detail})`
-        : `No se pudo registrar el aporte v2. Podés reintentar sin duplicarlo. (${detail})`);
+        : definitive
+          ? `El aporte v2 fue rechazado y no quedó pendiente para reintento. (${detail})`
+          : `No se pudo registrar el aporte v2. Podés reintentar sin duplicarlo. (${detail})`);
     } finally {
       if (canApplyContributionResult(session, sessionRef.current)) {
         v2ContributionSavingRef.current = false;
@@ -697,6 +725,7 @@ export default function Home() {
         {v2Dashboard ? (
           <section className="panel" aria-label="Resumen financiero v2">
             <div className="panel-header"><div><h3>Modelo v2</h3><p>Lectura de posiciones y snapshots; las escrituras v1 se mantienen como respaldo.</p></div><button className="secondary-button" type="button" disabled={!v2Dashboard.positions.some((position) => !position.archivedAt) || isV2ContributionSaving} onClick={openV2Contribution}>Registrar aporte v2</button></div>
+            {v2PendingContributions.length > 0 && <p className="muted">Hay {v2PendingContributions.length} aporte{v2PendingContributions.length === 1 ? "" : "s"} v2 pendiente{v2PendingContributions.length === 1 ? "" : "s"} de reintento seguro en esta cuenta.</p>}
             {v2ContributionOpen && <form className="form-grid" onSubmit={saveV2Contribution}>
               <label>
                 Posición v2

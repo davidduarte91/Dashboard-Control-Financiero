@@ -305,7 +305,9 @@ function sessionHarness(client, options = {}) {
   ui.setV2ContributionError = (value) => { ui.v2ContributionError = value; };
   ui.setV2ContributionMessage = (value) => { ui.v2ContributionMessage = value; };
   ui.setV2ContributionSaving = (value) => { ui.isV2ContributionSaving = value; };
+  ui.setV2PendingContributions = (value) => { ui.v2PendingContributions = value; };
   ui.v2ContributionSavingRef = { current: false };
+  ui.readPendingContributions = () => [];
   ui.buildV2Dashboard = (value) => value;
   ui.readFinancialV2 = options.readFinancialV2 || (async () => ({ positions: [], snapshots: [] }));
   for (const [setter, key] of Object.entries({ setUser: "user", setDark: "isDark", setToday: "today", setHydrated: "hydrated", setAuthLoading: "authLoading", setHistoryOpen: "historyOpen", setAuthEmail: "authEmail", setAuthPassword: "authPassword" })) {
