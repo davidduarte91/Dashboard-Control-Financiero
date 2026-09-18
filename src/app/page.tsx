@@ -19,7 +19,7 @@ import {
   type FinancialSnapshot,
 } from "@/lib/financial-cache";
 import { buildV2Dashboard, readFinancialV2, type V2Dashboard } from "@/lib/financial-v2-read";
-import { canApplyContributionResult, createContributionRequest, recordContribution, type ContributionRequest } from "@/lib/financial-v2-write";
+import { canApplyContributionResult, createContributionRequest, recordContribution, resolveExistingContributionPosition, type ContributionRequest } from "@/lib/financial-v2-write";
 import { findPendingContribution, isDefinitiveContributionError, readPendingContributions, removePendingContribution, savePendingContribution, type PendingContribution } from "@/lib/financial-v2-pending";
 const defaults = ["FCI", "Cedears", "Acciones argentinas", "Criptomonedas"];
 const descriptions: Record<string, string> = {
@@ -363,6 +363,13 @@ export default function Home() {
     return { capital, available, current: available + invested };
   }, [entries, investments]);
   const gain = summary.current - summary.capital;
+  const isNewV2Contribution = movementKind === "aporte" && !editing;
+  function v2Catalog<T extends { name: string; archivedAt?: string }>(items: T[], fallback: string[]) {
+    return isNewV2Contribution && v2Dashboard ? items.filter((item) => !item.archivedAt).map((item) => item.name) : fallback;
+  }
+  const formEnvelopes = v2Catalog(v2Dashboard?.envelopes || [], envelopes);
+  const formInvestments = v2Catalog(v2Dashboard?.investments || [], investments);
+  const formAccounts = v2Catalog(v2Dashboard?.accounts || [], accounts);
   const envelopeTotals = envelopes.map((name) => {
     const items = entries.filter((entry) => entry.envelope === name);
     const contributions = items
@@ -378,10 +385,11 @@ export default function Home() {
     draftId.current = null;
     setEditing(null);
     setValuation("");
+    setV2ContributionError("");
     setMovementKind("aporte");
-    setEnvelopeMode(envelopes.length ? "existing" : "new");
+    setEnvelopeMode("existing");
     setInvestmentMode("existing");
-    setAccountMode(accounts.length ? "existing" : "new");
+    setAccountMode("existing");
     setModalOpen(true);
   };
   const openEdit = (entry: Entry) => {
@@ -389,6 +397,7 @@ export default function Home() {
     draftId.current = null;
     setEditing(entry);
     setValuation("");
+    setV2ContributionError("");
     setMovementKind(entry.kind === "retiro" ? "retiro" : "aporte");
     setEnvelopeMode("existing");
     setInvestmentMode("existing");
@@ -403,6 +412,7 @@ export default function Home() {
     draftId.current = null;
     setEditing(null);
     setValuation("");
+    setV2ContributionError("");
     setMovementKind("retiro");
     setEnvelopeMode("existing");
     setInvestmentMode("existing");
@@ -432,15 +442,13 @@ export default function Home() {
     setV2ContributionMessage("");
     setV2ContributionOpen(true);
   };
-  const saveV2Contribution = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (v2ContributionSavingRef.current) return;
+  const recordV2Contribution = async (positionId: string, amount: number) => {
+    if (v2ContributionSavingRef.current) return false;
     const session = sessionRef.current;
-    const position = v2Dashboard?.positions.find((item) => item.id === v2ContributionPositionId && !item.archivedAt);
-    const amount = parseAmount(v2ContributionAmount);
+    const position = v2Dashboard?.positions.find((item) => item.id === positionId && !item.archivedAt);
     if (!session.userId || !position || !Number.isFinite(amount) || amount <= 0) {
       setV2ContributionError("Elegí una posición v2 activa e ingresá un importe positivo.");
-      return;
+      return false;
     }
     const pending = v2ContributionRequestRef.current;
     const inMemory = pending?.userId === session.userId
@@ -458,7 +466,7 @@ export default function Home() {
       setV2PendingContributions(readPendingContributions(localStorage, session.userId));
     } catch {
       setV2ContributionError("No se pudo guardar el reintento seguro de este aporte en este navegador.");
-      return;
+      return false;
     }
     v2ContributionRequestRef.current = { userId: session.userId, request };
     v2ContributionSavingRef.current = true;
@@ -471,20 +479,19 @@ export default function Home() {
       contributionRecorded = true;
       try { removePendingContribution(localStorage, session.userId, request.requestId); } catch { /* The server result is authoritative; report the refresh outcome below. */ }
       const refreshed = buildV2Dashboard(await readFinancialV2(supabase, session.userId));
-      if (!canApplyContributionResult(session, sessionRef.current)) return;
+      if (!canApplyContributionResult(session, sessionRef.current)) return false;
       setV2Dashboard(refreshed);
       setV2ReadError(false);
       try { setV2PendingContributions(readPendingContributions(localStorage, session.userId)); } catch { setV2PendingContributions([]); }
       v2ContributionRequestRef.current = null;
-      setV2ContributionAmount("");
-      setV2ContributionOpen(false);
       setV2ContributionMessage("Aporte v2 registrado y snapshot actualizado desde el servidor.");
+      return true;
     } catch (error) {
       const definitive = isDefinitiveContributionError(error);
       if (definitive) {
         try { removePendingContribution(localStorage, session.userId, request.requestId); } catch { /* The user still receives the server error. */ }
       }
-      if (!canApplyContributionResult(session, sessionRef.current)) return;
+      if (!canApplyContributionResult(session, sessionRef.current)) return false;
       const detail = error instanceof Error ? error.message : "Error desconocido";
       try { setV2PendingContributions(readPendingContributions(localStorage, session.userId)); } catch { setV2PendingContributions([]); }
       setV2ContributionError(contributionRecorded
@@ -492,11 +499,20 @@ export default function Home() {
         : definitive
           ? `El aporte v2 fue rechazado y no quedó pendiente para reintento. (${detail})`
           : `No se pudo registrar el aporte v2. Podés reintentar sin duplicarlo. (${detail})`);
+      return false;
     } finally {
       if (canApplyContributionResult(session, sessionRef.current)) {
         v2ContributionSavingRef.current = false;
         setV2ContributionSaving(false);
       }
+    }
+  };
+  const saveV2Contribution = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const saved = await recordV2Contribution(v2ContributionPositionId, parseAmount(v2ContributionAmount));
+    if (saved) {
+      setV2ContributionAmount("");
+      setV2ContributionOpen(false);
     }
   };
   const saveEntry = async (event: FormEvent<HTMLFormElement>) => {
@@ -512,6 +528,34 @@ export default function Home() {
     const investment = String(
       form.get(investmentMode === "new" ? "newInvestment" : "investment") || "",
     );
+    const account = String(
+      form.get(accountMode === "new" ? "newAccount" : "account") || "",
+    );
+    const currency = form.get("currency") as Currency;
+    if (movementKind === "aporte" && !editing) {
+      if (!v2Dashboard) {
+        setV2ContributionError("No se puede registrar un aporte hasta que cargue el modelo v2. El aporte no se guardó en v1.");
+        return;
+      }
+      if (envelopeMode === "new" || investmentMode === "new" || accountMode === "new") {
+        setV2ContributionError("La creación de posiciones v2 todavía requiere una RPC de backend. Elegí una combinación existente.");
+        return;
+      }
+      const position = resolveExistingContributionPosition(v2Dashboard.positions, v2Dashboard, {
+        envelope, investment, account, currency,
+      });
+      if (!position) {
+        setV2ContributionError("No existe una posición v2 para esta combinación. No se creó ni se registró ningún aporte; falta una RPC segura para crear o resolver posiciones.");
+        return;
+      }
+      const saved = await recordV2Contribution(position.id, amount);
+      if (saved) {
+        draftId.current = null;
+        setModalOpen(false);
+        formElement.reset();
+      }
+      return;
+    }
     if (movementKind === "retiro" && !envelope && !investment) {
       window.alert("Elegí el sobre o la inversión de donde sale el dinero.");
       return;
@@ -520,10 +564,8 @@ export default function Home() {
       id: editing?.id || (draftId.current ??= crypto.randomUUID()),
       envelope,
       investment,
-      account: String(
-        form.get(accountMode === "new" ? "newAccount" : "account") || "",
-      ),
-      currency: form.get("currency") as Currency,
+      account,
+      currency,
       amount,
       currentValue:
         movementKind === "retiro"
@@ -764,7 +806,7 @@ export default function Home() {
             ))}
             <p className="muted">Las monedas se muestran separadas. {v2Dashboard.hasPendingSbsReconciliation ? "SBS RTA PESOS conserva una valuación legacy multi-sobre pendiente de reconciliación." : ""}</p>
           </section>
-        ) : v2ReadError ? <p className="muted">No se pudo leer v2; se mantiene la vista v1 como respaldo.</p> : null}
+        ) : v2ReadError ? <p className="muted">No se pudo leer v2; se muestra el historial v1 de respaldo, que no incluye los nuevos aportes v2.</p> : null}
         <section className="welcome-row" id="resumen">
           <div>
             <h2>Tu patrimonio, en perspectiva.</h2>
@@ -1042,7 +1084,7 @@ export default function Home() {
           className="modal-backdrop"
           role="presentation"
           onMouseDown={(event) =>
-            !savingRef.current && event.target === event.currentTarget && setModalOpen(false)
+            !savingRef.current && !(isNewV2Contribution && v2ContributionSavingRef.current) && event.target === event.currentTarget && setModalOpen(false)
           }
         >
           <section className="modal" role="dialog" aria-modal="true">
@@ -1061,7 +1103,7 @@ export default function Home() {
               </div>
               <button
                 className="close-button"
-                disabled={isSaving}
+                disabled={isSaving || (isNewV2Contribution && isV2ContributionSaving)}
                 onClick={() => {
                   setModalOpen(false);
                   setValuation("");
@@ -1072,6 +1114,7 @@ export default function Home() {
               </button>
             </div>
             {authError && <p className="auth-error" role="alert">{authError}</p>}
+            {v2ContributionError && <p className="auth-error" role="alert">{v2ContributionError}</p>}
             {valuation ? (
               <form onSubmit={saveValuation}>
                 <fieldset className="form-grid" disabled={isSaving}>
@@ -1144,7 +1187,7 @@ export default function Home() {
               </form>
             ) : (
               <form onSubmit={saveEntry}>
-                <fieldset className="form-grid" disabled={isSaving}>
+                <fieldset className="form-grid" disabled={isSaving || (isNewV2Contribution && isV2ContributionSaving)}>
                   <label>
                     Tipo de movimiento
                     <select
@@ -1173,10 +1216,10 @@ export default function Home() {
                       }
                     >
                       <option value="">Elegir sobre</option>
-                      {envelopes.map((name) => (
+                      {formEnvelopes.map((name) => (
                         <option key={name}>{name}</option>
                       ))}
-                      <option value="__new__">+ Crear nuevo sobre...</option>
+                      {!isNewV2Contribution && <option value="__new__">+ Crear nuevo sobre...</option>}
                     </select>
                   </label>
                   <label>
@@ -1184,7 +1227,7 @@ export default function Home() {
                     <span className="optional-label">(opcional)</span>
                     <input
                       name="newEnvelope"
-                      disabled={envelopeMode !== "new"}
+                      disabled={envelopeMode !== "new" || isNewV2Contribution}
                       placeholder="Ej. Tarjeta crédito Septiembre"
                     />
                   </label>
@@ -1201,12 +1244,12 @@ export default function Home() {
                       }
                     >
                       <option value="">Elegir inversión</option>
-                      {investments.map((name) => (
+                      {formInvestments.map((name) => (
                         <option key={name}>{name}</option>
                       ))}
-                      <option value="__new__">
+                      {!isNewV2Contribution && <option value="__new__">
                         + Crear nueva categoría...
-                      </option>
+                      </option>}
                     </select>
                   </label>
                   <label>
@@ -1214,7 +1257,7 @@ export default function Home() {
                     <span className="optional-label">(opcional)</span>
                     <input
                       name="newInvestment"
-                      disabled={investmentMode !== "new"}
+                      disabled={investmentMode !== "new" || isNewV2Contribution}
                       placeholder="Ej. FCI Galicia"
                     />
                   </label>
@@ -1231,12 +1274,12 @@ export default function Home() {
                       }
                     >
                       <option value="">Elegir plataforma</option>
-                      {accounts.map((name) => (
+                      {formAccounts.map((name) => (
                         <option key={name}>{name}</option>
                       ))}
-                      <option value="__new__">
+                      {!isNewV2Contribution && <option value="__new__">
                         + Agregar nueva plataforma...
-                      </option>
+                      </option>}
                     </select>
                   </label>
                   <label>
@@ -1244,7 +1287,7 @@ export default function Home() {
                     <span className="optional-label">(opcional)</span>
                     <input
                       name="newAccount"
-                      disabled={accountMode !== "new"}
+                      disabled={accountMode !== "new" || isNewV2Contribution}
                       placeholder="Ej. Brubank, Lemon o Nexo"
                     />
                   </label>
@@ -1259,7 +1302,7 @@ export default function Home() {
                       <option>USDT</option>
                     </select>
                   </label>
-                  <label>
+                  {!isNewV2Contribution && <label>
                     Tipo de cambio a ARS
                     <input
                       name="exchangeRate"
@@ -1271,7 +1314,7 @@ export default function Home() {
                         event.target.value = formatMoneyInput(event.target.value);
                       }}
                     />
-                  </label>
+                  </label>}
                   <label>
                     {movementKind === "retiro"
                       ? "Cantidad a retirar"
@@ -1289,7 +1332,7 @@ export default function Home() {
                       }}
                     />
                   </label>
-                  {movementKind !== "retiro" && (
+                  {movementKind !== "retiro" && !isNewV2Contribution && (
                     <label>
                       Valor actual{" "}
                       <span className="optional-label">(opcional)</span>
@@ -1308,7 +1351,7 @@ export default function Home() {
                       />
                     </label>
                   )}
-                  <label>
+                  {!isNewV2Contribution && <label>
                     Fecha
                     <input
                       name="date"
@@ -1317,23 +1360,24 @@ export default function Home() {
                       value={editing?.date || today}
                       readOnly
                     />
-                  </label>
+                  </label>}
                 </fieldset>
                 <p className="form-hint">
-                  Elegí una opción existente o seleccioná “crear nuevo”. Nunca
-                  se guardan ambas opciones juntas.
+                  {isNewV2Contribution
+                    ? "Los aportes nuevos se registran sólo en v2 con la fecha y hora actual en UTC. La combinación debe corresponder a una posición v2 existente."
+                    : "Los retiros, valuaciones y ediciones históricas siguen temporalmente en v1."}
                 </p>
                 <div className="modal-actions">
                   <button
                     type="button"
                     className="secondary-button"
-                    disabled={isSaving}
+                    disabled={isSaving || (isNewV2Contribution && isV2ContributionSaving)}
                     onClick={() => setModalOpen(false)}
                   >
                     Cancelar
                   </button>
-                  <button className="primary-button" disabled={isSaving}>
-                    {isSaving ? "Guardando..." : editing ? "Guardar cambios" : "Guardar actualización"}
+                  <button className="primary-button" disabled={isSaving || (isNewV2Contribution && isV2ContributionSaving)}>
+                    {isV2ContributionSaving ? "Guardando aporte v2..." : isSaving ? "Guardando..." : editing ? "Guardar cambios" : "Guardar actualización"}
                   </button>
                 </div>
               </form>

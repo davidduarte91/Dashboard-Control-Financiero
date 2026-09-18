@@ -190,7 +190,8 @@ function formHarness(client) {
     ...sync, ...cache, Error, user: { id: "u1" }, supabase: client, entries: [],
     envelopes: ["Origen"], investments: ["FCI"], accounts: ["Banco"],
     envelopeMode: "existing", investmentMode: "existing", accountMode: "existing",
-    editing: null, movementKind: "aporte", valuation: "FCI",
+    editing: null, movementKind: "retiro", valuation: "FCI",
+    v2Dashboard: null, v2ContributionError: "",
     savingRef: { current: false }, draftId: { current: null },
     sessionRef: { current: { userId: "u1", ready: true } },
     snapshotRef: { current: { entries: [], lists: { envelopes: ["Origen"], investments: ["FCI"], accounts: ["Banco"] } } },
@@ -199,6 +200,13 @@ function formHarness(client) {
     parseAmount: (value) => Number(value.replaceAll(".", "").replace(",", ".")),
     localStorage: memoryStorage(), window: { alert() {}, prompt: () => "Destino", confirm: () => true },
   });
+  context.setV2ContributionError = (value) => { context.v2ContributionError = value; };
+  context.resolveExistingContributionPosition = (positions, names, selection) => positions.find((position) => !position.archivedAt
+    && names.envelopeName[position.envelopeId] === selection.envelope
+    && names.investmentName[position.investmentId] === selection.investment
+    && names.accountName[position.accountId] === selection.account
+    && position.currency === selection.currency) || null;
+  context.recordV2Contribution = async () => false;
   context.crypto = { randomUUID: () => `draft-${++context.uuidCount}` };
   for (const [setter, key] of Object.entries({ setEntries: "entries", setEnvelopes: "envelopes", setInvestments: "investments", setAccounts: "accounts", setSaving: "isSaving", setSyncStatus: "syncStatus", setAuthError: "authError", setModalOpen: "isModalOpen", setEditing: "editing", setValuation: "valuation" })) {
     context[setter] = (value) => { context[key] = value; };
@@ -225,6 +233,49 @@ test("rapid form submissions create only one movement and unlock after completio
   assert.equal(ui.syncStatus, "synced");
   assert.equal(ui.isModalOpen, false);
   assert.equal(ui.savingRef.current, false);
+});
+
+test("un aporte del formulario principal usa v2 y no inserta una entrada v1", async () => {
+  const client = fakeClient();
+  const ui = formHarness(client);
+  ui.movementKind = "aporte";
+  ui.v2Dashboard = {
+    positions: [{ id: "position-ars", envelopeId: "e", investmentId: "i", accountId: "a", currency: "ARS" }],
+    envelopeName: { e: "Origen" }, investmentName: { i: "FCI" }, accountName: { a: "Banco" },
+  };
+  let positionId = null;
+  ui.recordV2Contribution = async (id, amount) => { positionId = `${id}:${amount}`; return true; };
+  await ui.handlers.saveEntry(ui.event);
+  assert.equal(positionId, "position-ars:100.5");
+  assert.equal(client.tables.financial_entries.length, 0);
+  assert.equal(ui.isModalOpen, false);
+});
+
+test("una combinación sin posición v2 no escribe en v1", async () => {
+  const client = fakeClient();
+  const ui = formHarness(client);
+  ui.movementKind = "aporte";
+  ui.v2Dashboard = { positions: [], envelopeName: {}, investmentName: {}, accountName: {} };
+  await ui.handlers.saveEntry(ui.event);
+  assert.equal(client.tables.financial_entries.length, 0);
+  assert.match(ui.v2ContributionError, /No existe una posición v2/);
+});
+
+test("un retiro del formulario principal sigue escribiendo sólo en v1", async () => {
+  const client = fakeClient();
+  const ui = formHarness(client);
+  ui.movementKind = "retiro";
+  await ui.handlers.saveEntry(ui.event);
+  assert.equal(client.tables.financial_entries.length, 1);
+  assert.equal(client.tables.financial_entries[0].kind, "retiro");
+});
+
+test("una valuación sigue escribiendo sólo en v1", async () => {
+  const client = fakeClient();
+  const ui = formHarness(client);
+  await ui.handlers.saveValuation(ui.event);
+  assert.equal(client.tables.financial_entries.length, 1);
+  assert.equal(client.tables.financial_entries[0].kind, "valuacion");
 });
 
 test("a failed entry after successful lists remains an error and retains the draft for retry", async () => {

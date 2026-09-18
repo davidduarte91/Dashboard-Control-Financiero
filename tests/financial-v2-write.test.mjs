@@ -67,3 +67,11 @@ test("un resultado tardío sólo se aplica a la sesión que inició el aporte", 
   assert.equal(mod.canApplyContributionResult(sessionA, sessionB), false);
   assert.equal(mod.canApplyContributionResult(sessionA, { userId: null }), false);
 });
+
+test("el aporte principal resuelve sólo una posición existente con la misma moneda", () => {
+  const names = { envelopeName: { e: "Sobre" }, investmentName: { i: "FCI" }, accountName: { a: "Banco" } };
+  const positions = [{ id: "ars", envelopeId: "e", investmentId: "i", accountId: "a", currency: "ARS" }, { id: "usd", envelopeId: "e", investmentId: "i", accountId: "a", currency: "USD" }];
+  assert.equal(mod.resolveExistingContributionPosition(positions, names, { envelope: "Sobre", investment: "FCI", account: "Banco", currency: "ARS" }).id, "ars");
+  assert.equal(mod.resolveExistingContributionPosition(positions, names, { envelope: "Sobre", investment: "FCI", account: "Banco", currency: "USDT" }), null);
+  assert.equal(mod.resolveExistingContributionPosition(positions, names, { envelope: "Otro", investment: "FCI", account: "Banco", currency: "ARS" }), null);
+});

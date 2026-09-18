@@ -14,6 +14,27 @@ export type ContributionResult = {
   snapshot: { position_id: string; current_value: number | string };
 };
 
+export type ContributionPositionLookup = {
+  id: string;
+  envelopeId: string;
+  investmentId: string;
+  accountId: string;
+  currency: string;
+  archivedAt?: string;
+};
+
+export function resolveExistingContributionPosition(
+  positions: ContributionPositionLookup[],
+  names: { envelopeName: Record<string, string>; investmentName: Record<string, string>; accountName: Record<string, string> },
+  selection: { envelope: string; investment: string; account: string; currency: string },
+) {
+  return positions.find((position) => !position.archivedAt
+    && names.envelopeName[position.envelopeId] === selection.envelope
+    && names.investmentName[position.investmentId] === selection.investment
+    && names.accountName[position.accountId] === selection.account
+    && position.currency === selection.currency) || null;
+}
+
 export function canApplyContributionResult(
   requestSession: { userId: string | null },
   currentSession: { userId: string | null },
